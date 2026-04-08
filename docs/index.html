@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="0; url=CascadeScope.html">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CascadeScope Redirect</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: "Segoe UI", sans-serif;
+      background: #10161d;
+      color: #edf3f4;
+    }
+
+    .panel {
+      width: min(720px, calc(100% - 32px));
+      padding: 28px;
+      border-radius: 20px;
+      background: rgba(25, 33, 43, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 30px;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+
+    p {
+      margin: 0;
+      line-height: 1.7;
+      color: #b9c6cb;
+    }
+
+    a {
+      color: #f2b468;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>CascadeScope</h1>
+    <p>
+      Redirecting to <a href="CascadeScope.html">CascadeScope.html</a>.
+      On GitHub Pages, the site root is served through <code>index.html</code>, so this file stays as a minimal forwarder while the actual demo entry point remains <code>CascadeScope.html</code>.
+    </p>
+  </main>
+  <script>
+    window.location.replace("CascadeScope.html");
+  </script>
+</body>
+</html>
