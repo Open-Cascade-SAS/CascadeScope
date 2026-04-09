@@ -49,6 +49,14 @@ if (typeof window === 'undefined') {
           }
           aHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
 
+          // Prevent the browser from caching document responses without the
+          // COOP/COEP headers above.  Without this, Safari serves the cached
+          // (header-less) HTML on Cmd+R refresh, bypassing this fetch handler,
+          // which leaves crossOriginIsolated=false and breaks SharedArrayBuffer.
+          if (aRequest.mode === "navigate") {
+            aHeaders.set("Cache-Control", "no-store");
+          }
+
           return new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
