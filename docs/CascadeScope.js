@@ -10717,13 +10717,13 @@ function checkIncomingModuleAPI() {
 }
 
 var ASM_CONSTS = {
-  3460141: () => {
+  3459981: () => {
     CascadeScopeFileUpload.requestOpen();
   },
-  3460183: ($0, $1) => {
+  3460023: ($0, $1) => {
     alert(UTF8ToString($0) + ": " + UTF8ToString($1));
   },
-  3460238: () => {
+  3460078: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -10734,7 +10734,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientWidth > 0 ? canvas.clientWidth : 0;
   },
-  3460469: () => {
+  3460309: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -10745,13 +10745,13 @@ var ASM_CONSTS = {
     }
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
-  3460704: () => {
+  3460544: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  3460790: ($0, $1, $2, $3) => {
+  3460630: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
   }
 };
