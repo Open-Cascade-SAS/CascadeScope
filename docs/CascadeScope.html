@@ -156,6 +156,11 @@
         var dropZone = options.dropZone || 0;
         if (!Module['ccall'] || !Module['FS']) {
           console.warn('CascadeScope: runtime is not ready for file upload callbacks yet.');
+          var statusEl = document.getElementById('status');
+          if (statusEl && !window.crossOriginIsolated) {
+            statusEl.innerText = 'File drop ignored: CascadeScope runtime is not '
+              + 'loaded (page is not cross-origin-isolated).';
+          }
           return;
         }
         for (var i = 0; i < files.length; i++) {
@@ -276,7 +281,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776287968';
+    var CascadeScopeBuildStamp = '1776289675';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -344,7 +349,7 @@
       return false;
     };
   </script>
-  <script src="coi-serviceworker.js?v=1776287968"></script>
+  <script src="coi-serviceworker.js?v=1776289675"></script>
   <script>
     // Safari workaround: on Cmd+R refresh, Safari may serve the HTML from its
     // HTTP cache without routing through the service worker, so COOP/COEP headers
@@ -362,7 +367,20 @@
         }
         return;
       }
-      if (!navigator.serviceWorker) return;
+      if (!navigator.serviceWorker) {
+        // Plain HTTP / file:// / missing SW support — the app will never load
+        // because the wasm module insert is gated on crossOriginIsolated below.
+        // Drag-drop listeners are also inert in this state (file payloads can't
+        // reach the C++ side). Surface a visible message so the user isn't stuck
+        // on "Loading...".
+        var statusEl = document.getElementById('status');
+        if (statusEl) {
+          statusEl.innerText = 'CascadeScope requires a cross-origin-isolated '
+            + 'context. Serve over HTTPS (or localhost) with a service worker '
+            + 'that sets COOP=same-origin and COEP=require-corp.';
+        }
+        return;
+      }
       var url = new URL(location.href);
       if (url.searchParams.has('_coi')) {
         // Already redirected — coi-serviceworker.js will re-register and reload.
@@ -399,7 +417,7 @@
       cascadeScopeModuleScript.async = true;
       cascadeScopeModuleScript.type = 'text/javascript';
       cascadeScopeModuleScript.src =
-        'CascadeScope.js?v=1776287968';
+        'CascadeScope.js?v=1776289675';
       document.body.appendChild(cascadeScopeModuleScript);
     }
   </script>
