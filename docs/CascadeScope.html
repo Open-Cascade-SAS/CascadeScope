@@ -245,7 +245,38 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776249430';
+    // File download infrastructure for CascadeScope Wasm build. Reads a file
+    // from the Emscripten VFS and hands it to the browser as a download.
+    var CascadeScopeFileDownload = {
+      trigger: function(vfsPath, downloadName) {
+        if (!Module['FS']) {
+          console.warn('CascadeScope: runtime is not ready for file download.');
+          return;
+        }
+        var data;
+        try {
+          data = Module['FS'].readFile(vfsPath);
+        } catch (ex) {
+          console.error('CascadeScope: failed to read VFS file for download: ' + ex);
+          return;
+        }
+        var blob = new Blob([data], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = downloadName || 'download.brep';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(function() {
+          URL.revokeObjectURL(url);
+          try { Module['FS'].unlink(vfsPath); } catch (ex) {}
+        }, 1000);
+      }
+    };
+
+    var CascadeScopeBuildStamp = '1776287968';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -255,7 +286,26 @@
     }
 
     var Module = {
-      preRun: [],
+      preRun: [function () {
+        var idbfs = (typeof IDBFS !== 'undefined')
+          ? IDBFS
+          : (FS && FS.filesystems ? FS.filesystems.IDBFS : null);
+        if (!idbfs) {
+          console.warn('IDBFS unavailable; settings will not persist.');
+          return;
+        }
+        try { FS.mkdir('/cs_config'); }
+        catch (e) {
+          if (!e || e.code !== 'EEXIST') { console.warn('mkdir /cs_config:', e); }
+        }
+        try { FS.mount(idbfs, {}, '/cs_config'); }
+        catch (e) { console.warn('IDBFS mount failed:', e); return; }
+        Module.addRunDependency('cs-config-syncfs');
+        FS.syncfs(true, function (err) {
+          if (err) { console.warn('IDBFS hydrate failed:', err); }
+          Module.removeRunDependency('cs-config-syncfs');
+        });
+      }],
       print: function(text) { console.log(text); },
       printErr: function(text) { console.error(text); },
       canvas: CascadeScopeShell.getCanvas(),
@@ -294,7 +344,7 @@
       return false;
     };
   </script>
-  <script src="coi-serviceworker.js?v=1776249430"></script>
+  <script src="coi-serviceworker.js?v=1776287968"></script>
   <script>
     // Safari workaround: on Cmd+R refresh, Safari may serve the HTML from its
     // HTTP cache without routing through the service worker, so COOP/COEP headers
@@ -336,6 +386,22 @@
     })();
   </script>
   <!-- <script async type="text/javascript" src="CascadeScope.js"></script> -->
-  <script async type="text/javascript" src="CascadeScope.js?v=1776249430"></script>
+  <script>
+    // Only start loading the wasm module if the page is already in a
+    // cross-origin-isolated context. If not, coi-serviceworker.js above will
+    // install the SW and trigger a reload (or the Safari recovery above will
+    // redirect with _coi=1) — in that case, loading CascadeScope.js now would
+    // race with the reload and fail with "SharedArrayBuffer transfer requires
+    // self.crossOriginIsolated" at loadWasmModuleToWorker. Gating the insert
+    // eliminates that race on every browser without adding workarounds.
+    if (window.crossOriginIsolated) {
+      var cascadeScopeModuleScript = document.createElement('script');
+      cascadeScopeModuleScript.async = true;
+      cascadeScopeModuleScript.type = 'text/javascript';
+      cascadeScopeModuleScript.src =
+        'CascadeScope.js?v=1776287968';
+      document.body.appendChild(cascadeScopeModuleScript);
+    }
+  </script>
 </body>
 </html>

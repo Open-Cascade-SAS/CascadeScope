@@ -744,6 +744,7 @@ function exitRuntime() {
   callRuntimeCallbacks(onExits);
   FS.quit();
   TTY.shutdown();
+  IDBFS.quit();
   // End ATEXITS hooks
   PThread.terminateAllThreads();
   runtimeExited = true;
@@ -2551,6 +2552,370 @@ var FS_getMode = (canRead, canWrite) => {
   return mode;
 };
 
+var IDBFS = {
+  dbs: {},
+  indexedDB: () => {
+    assert(typeof indexedDB != "undefined", "IDBFS used, but indexedDB not supported");
+    return indexedDB;
+  },
+  DB_VERSION: 21,
+  DB_STORE_NAME: "FILE_DATA",
+  queuePersist: mount => {
+    function onPersistComplete() {
+      if (mount.idbPersistState === "again") startPersist(); else mount.idbPersistState = 0;
+    }
+    function startPersist() {
+      mount.idbPersistState = "idb";
+      // Mark that we are currently running a sync operation
+      IDBFS.syncfs(mount, /*populate:*/ false, onPersistComplete);
+    }
+    if (!mount.idbPersistState) {
+      // Programs typically write/copy/move multiple files in the in-memory
+      // filesystem within a single app frame, so when a filesystem sync
+      // command is triggered, do not start it immediately, but only after
+      // the current frame is finished. This way all the modified files
+      // inside the main loop tick will be batched up to the same sync.
+      mount.idbPersistState = setTimeout(startPersist, 0);
+    } else if (mount.idbPersistState === "idb") {
+      // There is an active IndexedDB sync operation in-flight, but we now
+      // have accumulated more files to sync. We should therefore queue up
+      // a new sync after the current one finishes so that all writes
+      // will be properly persisted.
+      mount.idbPersistState = "again";
+    }
+  },
+  mount: mount => {
+    // reuse core MEMFS functionality
+    var mnt = MEMFS.mount(mount);
+    // If the automatic IDBFS persistence option has been selected, then automatically persist
+    // all modifications to the filesystem as they occur.
+    if (mount?.opts?.autoPersist) {
+      mount.idbPersistState = 0;
+      // IndexedDB sync starts in idle state
+      var memfs_node_ops = mnt.node_ops;
+      mnt.node_ops = {
+        ...mnt.node_ops
+      };
+      // Clone node_ops to inject write tracking
+      mnt.node_ops.mknod = (parent, name, mode, dev) => {
+        var node = memfs_node_ops.mknod(parent, name, mode, dev);
+        // Propagate injected node_ops to the newly created child node
+        node.node_ops = mnt.node_ops;
+        // Remember for each IDBFS node which IDBFS mount point they came from so we know which mount to persist on modification.
+        node.idbfs_mount = mnt.mount;
+        // Remember original MEMFS stream_ops for this node
+        node.memfs_stream_ops = node.stream_ops;
+        // Clone stream_ops to inject write tracking
+        node.stream_ops = {
+          ...node.stream_ops
+        };
+        // Track all file writes
+        node.stream_ops.write = (stream, buffer, offset, length, position, canOwn) => {
+          // This file has been modified, we must persist IndexedDB when this file closes
+          stream.node.isModified = true;
+          return node.memfs_stream_ops.write(stream, buffer, offset, length, position, canOwn);
+        };
+        // Persist IndexedDB on file close
+        node.stream_ops.close = stream => {
+          var n = stream.node;
+          if (n.isModified) {
+            IDBFS.queuePersist(n.idbfs_mount);
+            n.isModified = false;
+          }
+          if (n.memfs_stream_ops.close) return n.memfs_stream_ops.close(stream);
+        };
+        // Persist the node we just created to IndexedDB
+        IDBFS.queuePersist(mnt.mount);
+        return node;
+      };
+      // Also kick off persisting the filesystem on other operations that modify the filesystem.
+      mnt.node_ops.rmdir = (...args) => (IDBFS.queuePersist(mnt.mount), memfs_node_ops.rmdir(...args));
+      mnt.node_ops.symlink = (...args) => (IDBFS.queuePersist(mnt.mount), memfs_node_ops.symlink(...args));
+      mnt.node_ops.unlink = (...args) => (IDBFS.queuePersist(mnt.mount), memfs_node_ops.unlink(...args));
+      mnt.node_ops.rename = (...args) => (IDBFS.queuePersist(mnt.mount), memfs_node_ops.rename(...args));
+    }
+    return mnt;
+  },
+  syncfs: (mount, populate, callback) => {
+    IDBFS.getLocalSet(mount, (err, local) => {
+      if (err) return callback(err);
+      IDBFS.getRemoteSet(mount, (err, remote) => {
+        if (err) return callback(err);
+        var src = populate ? remote : local;
+        var dst = populate ? local : remote;
+        IDBFS.reconcile(src, dst, callback);
+      });
+    });
+  },
+  quit: () => {
+    for (var value of Object.values(IDBFS.dbs)) {
+      value.close();
+    }
+    IDBFS.dbs = {};
+  },
+  getDB: (name, callback) => {
+    // check the cache first
+    var db = IDBFS.dbs[name];
+    if (db) {
+      return callback(null, db);
+    }
+    var req;
+    try {
+      req = IDBFS.indexedDB().open(name, IDBFS.DB_VERSION);
+    } catch (e) {
+      return callback(e);
+    }
+    if (!req) {
+      return callback("Unable to connect to IndexedDB");
+    }
+    req.onupgradeneeded = e => {
+      var db = /** @type {IDBDatabase} */ (e.target.result);
+      var transaction = e.target.transaction;
+      var fileStore;
+      if (db.objectStoreNames.contains(IDBFS.DB_STORE_NAME)) {
+        fileStore = transaction.objectStore(IDBFS.DB_STORE_NAME);
+      } else {
+        fileStore = db.createObjectStore(IDBFS.DB_STORE_NAME);
+      }
+      if (!fileStore.indexNames.contains("timestamp")) {
+        fileStore.createIndex("timestamp", "timestamp", {
+          unique: false
+        });
+      }
+    };
+    req.onsuccess = () => {
+      db = /** @type {IDBDatabase} */ (req.result);
+      // add to the cache
+      IDBFS.dbs[name] = db;
+      callback(null, db);
+    };
+    req.onerror = e => {
+      callback(e.target.error);
+      e.preventDefault();
+    };
+  },
+  getLocalSet: (mount, callback) => {
+    var entries = {};
+    function isRealDir(p) {
+      return p !== "." && p !== "..";
+    }
+    function toAbsolute(root) {
+      return p => PATH.join2(root, p);
+    }
+    var check = FS.readdir(mount.mountpoint).filter(isRealDir).map(toAbsolute(mount.mountpoint));
+    while (check.length) {
+      var path = check.pop();
+      var stat;
+      try {
+        stat = FS.lstat(path);
+      } catch (e) {
+        return callback(e);
+      }
+      if (FS.isDir(stat.mode)) {
+        check.push(...FS.readdir(path).filter(isRealDir).map(toAbsolute(path)));
+      }
+      entries[path] = {
+        "timestamp": stat.mtime
+      };
+    }
+    return callback(null, {
+      type: "local",
+      entries
+    });
+  },
+  getRemoteSet: (mount, callback) => {
+    var entries = {};
+    IDBFS.getDB(mount.mountpoint, (err, db) => {
+      if (err) return callback(err);
+      try {
+        var transaction = db.transaction([ IDBFS.DB_STORE_NAME ], "readonly");
+        transaction.onerror = e => {
+          callback(e.target.error);
+          e.preventDefault();
+        };
+        var store = transaction.objectStore(IDBFS.DB_STORE_NAME);
+        var index = store.index("timestamp");
+        index.openKeyCursor().onsuccess = event => {
+          var cursor = event.target.result;
+          if (!cursor) {
+            return callback(null, {
+              type: "remote",
+              db,
+              entries
+            });
+          }
+          entries[cursor.primaryKey] = {
+            "timestamp": cursor.key
+          };
+          cursor.continue();
+        };
+      } catch (e) {
+        return callback(e);
+      }
+    });
+  },
+  loadLocalEntry: (path, callback) => {
+    var stat, node;
+    try {
+      var lookup = FS.lookupPath(path);
+      node = lookup.node;
+      stat = FS.lstat(path);
+    } catch (e) {
+      return callback(e);
+    }
+    if (FS.isDir(stat.mode)) {
+      return callback(null, {
+        "timestamp": stat.mtime,
+        "mode": stat.mode
+      });
+    } else if (FS.isLink(stat.mode)) {
+      return callback(null, {
+        "timestamp": stat.mtime,
+        "mode": stat.mode,
+        "link": node.link
+      });
+    } else if (FS.isFile(stat.mode)) {
+      // Performance consideration: storing a normal JavaScript array to a IndexedDB is much slower than storing a typed array.
+      // Therefore always convert the file contents to a typed array first before writing the data to IndexedDB.
+      node.contents = MEMFS.getFileDataAsTypedArray(node);
+      return callback(null, {
+        "timestamp": stat.mtime,
+        "mode": stat.mode,
+        "contents": node.contents
+      });
+    } else {
+      return callback(new Error("node type not supported"));
+    }
+  },
+  storeLocalEntry: (path, entry, callback) => {
+    try {
+      if (FS.isDir(entry["mode"])) {
+        FS.mkdirTree(path, entry["mode"]);
+      } else if (FS.isLink(entry["mode"])) {
+        FS.symlink(entry["link"], path);
+      } else if (FS.isFile(entry["mode"])) {
+        FS.writeFile(path, entry["contents"], {
+          canOwn: true
+        });
+      } else {
+        return callback(new Error("node type not supported"));
+      }
+      FS.chmod(path, entry["mode"]);
+      FS.utime(path, entry["timestamp"], entry["timestamp"]);
+    } catch (e) {
+      return callback(e);
+    }
+    callback(null);
+  },
+  removeLocalEntry: (path, callback) => {
+    try {
+      var stat = FS.lstat(path);
+      if (FS.isDir(stat.mode)) {
+        FS.rmdir(path);
+      } else {
+        FS.unlink(path);
+      }
+    } catch (e) {
+      return callback(e);
+    }
+    callback(null);
+  },
+  loadRemoteEntry: (store, path, callback) => {
+    var req = store.get(path);
+    req.onsuccess = event => callback(null, event.target.result);
+    req.onerror = e => {
+      callback(e.target.error);
+      e.preventDefault();
+    };
+  },
+  storeRemoteEntry: (store, path, entry, callback) => {
+    try {
+      var req = store.put(entry, path);
+    } catch (e) {
+      callback(e);
+      return;
+    }
+    req.onsuccess = event => callback();
+    req.onerror = e => {
+      callback(e.target.error);
+      e.preventDefault();
+    };
+  },
+  removeRemoteEntry: (store, path, callback) => {
+    var req = store.delete(path);
+    req.onsuccess = event => callback();
+    req.onerror = e => {
+      callback(e.target.error);
+      e.preventDefault();
+    };
+  },
+  reconcile: (src, dst, callback) => {
+    var total = 0;
+    var create = [];
+    for (var [key, e] of Object.entries(src.entries)) {
+      var e2 = dst.entries[key];
+      if (!e2 || e["timestamp"].getTime() != e2["timestamp"].getTime()) {
+        create.push(key);
+        total++;
+      }
+    }
+    var remove = [];
+    for (var key of Object.keys(dst.entries)) {
+      if (!src.entries[key]) {
+        remove.push(key);
+        total++;
+      }
+    }
+    if (!total) {
+      return callback(null);
+    }
+    var errored = false;
+    var db = src.type === "remote" ? src.db : dst.db;
+    var transaction = db.transaction([ IDBFS.DB_STORE_NAME ], "readwrite");
+    var store = transaction.objectStore(IDBFS.DB_STORE_NAME);
+    function done(err) {
+      if (err && !errored) {
+        errored = true;
+        return callback(err);
+      }
+    }
+    // transaction may abort if (for example) there is a QuotaExceededError
+    transaction.onerror = transaction.onabort = e => {
+      done(e.target.error);
+      e.preventDefault();
+    };
+    transaction.oncomplete = e => {
+      if (!errored) {
+        callback(null);
+      }
+    };
+    // sort paths in ascending order so directory entries are created
+    // before the files inside them
+    for (const path of create.sort()) {
+      if (dst.type === "local") {
+        IDBFS.loadRemoteEntry(store, path, (err, entry) => {
+          if (err) return done(err);
+          IDBFS.storeLocalEntry(path, entry, done);
+        });
+      } else {
+        IDBFS.loadLocalEntry(path, (err, entry) => {
+          if (err) return done(err);
+          IDBFS.storeRemoteEntry(store, path, entry, done);
+        });
+      }
+    }
+    // sort paths in descending order so files are deleted before their
+    // parent directories
+    for (var path of remove.sort().reverse()) {
+      if (dst.type === "local") {
+        IDBFS.removeLocalEntry(path, done);
+      } else {
+        IDBFS.removeRemoteEntry(store, path, done);
+      }
+    }
+  }
+};
+
 var strError = errno => UTF8ToString(_strerror(errno));
 
 var ERRNO_CODES = {
@@ -4023,7 +4388,8 @@ var FS = {
     FS.createDefaultDevices();
     FS.createSpecialDirectories();
     FS.filesystems = {
-      "MEMFS": MEMFS
+      "MEMFS": MEMFS,
+      "IDBFS": IDBFS
     };
   },
   init(input, output, error) {
@@ -4821,13 +5187,63 @@ function ___syscall_openat(dirfd, path, flags, varargs) {
   }
 }
 
+function ___syscall_renameat(olddirfd, oldpath, newdirfd, newpath) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(13, 0, 1, olddirfd, oldpath, newdirfd, newpath);
+  oldpath >>>= 0;
+  newpath >>>= 0;
+  try {
+    oldpath = SYSCALLS.getStr(oldpath);
+    newpath = SYSCALLS.getStr(newpath);
+    oldpath = SYSCALLS.calculateAt(olddirfd, oldpath);
+    newpath = SYSCALLS.calculateAt(newdirfd, newpath);
+    FS.rename(oldpath, newpath);
+    return 0;
+  } catch (e) {
+    if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
+    return -e.errno;
+  }
+}
+
+function ___syscall_rmdir(path) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(14, 0, 1, path);
+  path >>>= 0;
+  try {
+    path = SYSCALLS.getStr(path);
+    FS.rmdir(path);
+    return 0;
+  } catch (e) {
+    if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
+    return -e.errno;
+  }
+}
+
 function ___syscall_stat64(path, buf) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(13, 0, 1, path, buf);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(15, 0, 1, path, buf);
   path >>>= 0;
   buf >>>= 0;
   try {
     path = SYSCALLS.getStr(path);
     return SYSCALLS.writeStat(buf, FS.stat(path));
+  } catch (e) {
+    if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
+    return -e.errno;
+  }
+}
+
+function ___syscall_unlinkat(dirfd, path, flags) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(16, 0, 1, dirfd, path, flags);
+  path >>>= 0;
+  try {
+    path = SYSCALLS.getStr(path);
+    path = SYSCALLS.calculateAt(dirfd, path);
+    if (!flags) {
+      FS.unlink(path);
+    } else if (flags === 512) {
+      FS.rmdir(path);
+    } else {
+      return -28;
+    }
+    return 0;
   } catch (e) {
     if (typeof FS == "undefined" || !(e.name === "ErrnoError")) throw e;
     return -e.errno;
@@ -5185,7 +5601,7 @@ function __localtime_js(time, tmPtr) {
 }
 
 function __mmap_js(len, prot, flags, fd, offset, allocated, addr) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(14, 0, 1, len, prot, flags, fd, offset, allocated, addr);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(17, 0, 1, len, prot, flags, fd, offset, allocated, addr);
   len >>>= 0;
   offset = bigintToI53Checked(offset);
   allocated >>>= 0;
@@ -5207,7 +5623,7 @@ function __mmap_js(len, prot, flags, fd, offset, allocated, addr) {
 }
 
 function __munmap_js(addr, len, prot, flags, fd, offset) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(15, 0, 1, addr, len, prot, flags, fd, offset);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(18, 0, 1, addr, len, prot, flags, fd, offset);
   addr >>>= 0;
   len >>>= 0;
   offset = bigintToI53Checked(offset);
@@ -5843,7 +6259,7 @@ var EGL = {
 };
 
 function _eglBindAPI(api) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(16, 0, 1, api);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(19, 0, 1, api);
   if (api == 12448) {
     EGL.setErrorCode(12288);
     return 1;
@@ -5854,7 +6270,7 @@ function _eglBindAPI(api) {
 }
 
 function _eglChooseConfig(display, attrib_list, configs, config_size, numConfigs) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(17, 0, 1, display, attrib_list, configs, config_size, numConfigs);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(20, 0, 1, display, attrib_list, configs, config_size, numConfigs);
   display >>>= 0;
   attrib_list >>>= 0;
   configs >>>= 0;
@@ -6050,7 +6466,7 @@ var GL = {
 };
 
 function _eglCreateContext(display, config, hmm, contextAttribs) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(18, 0, 1, display, config, hmm, contextAttribs);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(21, 0, 1, display, config, hmm, contextAttribs);
   display >>>= 0;
   config >>>= 0;
   hmm >>>= 0;
@@ -6099,7 +6515,7 @@ function _eglCreateContext(display, config, hmm, contextAttribs) {
 }
 
 function _eglCreateWindowSurface(display, config, win, attrib_list) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(19, 0, 1, display, config, win, attrib_list);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(22, 0, 1, display, config, win, attrib_list);
   display >>>= 0;
   config >>>= 0;
   attrib_list >>>= 0;
@@ -6120,7 +6536,7 @@ function _eglCreateWindowSurface(display, config, win, attrib_list) {
 }
 
 function _eglDestroyContext(display, context) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(20, 0, 1, display, context);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(23, 0, 1, display, context);
   display >>>= 0;
   context >>>= 0;
   if (display != 62e3) {
@@ -6140,7 +6556,7 @@ function _eglDestroyContext(display, context) {
 }
 
 function _eglDestroySurface(display, surface) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(21, 0, 1, display, surface);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(24, 0, 1, display, surface);
   display >>>= 0;
   surface >>>= 0;
   if (display != 62e3) {
@@ -6162,17 +6578,17 @@ function _eglDestroySurface(display, surface) {
 }
 
 function _eglGetCurrentContext() {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(22, 0, 1);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(25, 0, 1);
   return EGL.currentContext;
 }
 
 function _eglGetCurrentDisplay() {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(23, 0, 1);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(26, 0, 1);
   return EGL.currentContext ? 62e3 : 0;
 }
 
 function _eglGetCurrentSurface(readdraw) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(24, 0, 1, readdraw);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(27, 0, 1, readdraw);
   if (readdraw == 12378) {
     return EGL.currentReadSurface;
   } else if (readdraw == 12377) {
@@ -6184,7 +6600,7 @@ function _eglGetCurrentSurface(readdraw) {
 }
 
 function _eglGetDisplay(nativeDisplayType) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(25, 0, 1, nativeDisplayType);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(28, 0, 1, nativeDisplayType);
   nativeDisplayType >>>= 0;
   EGL.setErrorCode(12288);
   // Emscripten EGL implementation "emulates" X11, and eglGetDisplay is
@@ -6197,12 +6613,12 @@ function _eglGetDisplay(nativeDisplayType) {
 }
 
 function _eglGetError() {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(26, 0, 1);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(29, 0, 1);
   return EGL.errorCode;
 }
 
 function _eglInitialize(display, majorVersion, minorVersion) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(27, 0, 1, display, majorVersion, minorVersion);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(30, 0, 1, display, majorVersion, minorVersion);
   display >>>= 0;
   majorVersion >>>= 0;
   minorVersion >>>= 0;
@@ -6222,7 +6638,7 @@ function _eglInitialize(display, majorVersion, minorVersion) {
 }
 
 function _eglMakeCurrent(display, draw, read, context) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(28, 0, 1, display, draw, read, context);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(31, 0, 1, display, draw, read, context);
   display >>>= 0;
   draw >>>= 0;
   read >>>= 0;
@@ -6256,7 +6672,7 @@ var stringToNewUTF8 = str => {
 };
 
 function _eglQueryString(display, name) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(29, 0, 1, display, name);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(32, 0, 1, display, name);
   display >>>= 0;
   if (display != 62e3) {
     EGL.setErrorCode(12296);
@@ -6293,7 +6709,7 @@ function _eglQueryString(display, name) {
 }
 
 function _eglQuerySurface(display, surface, attribute, value) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(30, 0, 1, display, surface, attribute, value);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(33, 0, 1, display, surface, attribute, value);
   display >>>= 0;
   surface >>>= 0;
   value >>>= 0;
@@ -6386,7 +6802,7 @@ function _eglQuerySurface(display, surface, attribute, value) {
 }
 
 function _eglSwapBuffers(dpy, surface) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(31, 0, 1, dpy, surface);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(34, 0, 1, dpy, surface);
   dpy >>>= 0;
   surface >>>= 0;
   if (!EGL.defaultDisplayInitialized) {
@@ -6407,7 +6823,7 @@ function _eglSwapBuffers(dpy, surface) {
 }
 
 function _eglTerminate(display) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(32, 0, 1, display);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(35, 0, 1, display);
   display >>>= 0;
   if (display != 62e3) {
     EGL.setErrorCode(12296);
@@ -6791,7 +7207,7 @@ function _emscripten_get_callstack(flags, str, maxbytes) {
 }
 
 function _emscripten_get_device_pixel_ratio() {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(33, 0, 1);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(36, 0, 1);
   return globalThis.devicePixelRatio ?? 1;
 }
 
@@ -6811,7 +7227,7 @@ var getBoundingClientRect = e => specialHTMLTargets.indexOf(e) < 0 ? e.getBoundi
 };
 
 function _emscripten_get_element_css_size(target, width, height) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(34, 0, 1, target, width, height);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(37, 0, 1, target, width, height);
   target >>>= 0;
   width >>>= 0;
   height >>>= 0;
@@ -6847,7 +7263,7 @@ var getPreloadedImageData = (path, w, h) => {
 };
 
 function _emscripten_get_preloaded_image_data(path, w, h) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(35, 0, 1, path, w, h);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(38, 0, 1, path, w, h);
   path >>>= 0;
   w >>>= 0;
   h >>>= 0;
@@ -9584,6 +10000,43 @@ var JSEvents = {
   }
 };
 
+var registerBeforeUnloadEventCallback = (target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString) => {
+  var beforeUnloadEventHandlerFunc = e => {
+    // Note: This is always called on the main browser thread, since it needs synchronously return a value!
+    var confirmationMessage = getWasmTableEntry(callbackfunc)(eventTypeId, 0, userData);
+    if (confirmationMessage) {
+      confirmationMessage = UTF8ToString(confirmationMessage);
+    }
+    if (confirmationMessage) {
+      e.preventDefault();
+      e.returnValue = confirmationMessage;
+      return confirmationMessage;
+    }
+  };
+  var eventHandler = {
+    target: findEventTarget(target),
+    eventTypeString,
+    eventTypeId,
+    userData,
+    callbackfunc,
+    handlerFunc: beforeUnloadEventHandlerFunc,
+    useCapture
+  };
+  return JSEvents.registerOrRemoveHandler(eventHandler);
+};
+
+function _emscripten_set_beforeunload_callback_on_thread(userData, callbackfunc, targetThread) {
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(39, 0, 1, userData, callbackfunc, targetThread);
+  userData >>>= 0;
+  callbackfunc >>>= 0;
+  targetThread >>>= 0;
+  if (typeof onbeforeunload == "undefined") return -1;
+  // beforeunload callback can only be registered on the main browser thread, because the page will go away immediately after returning from the handler,
+  // and there is no time to start proxying it anywhere.
+  if (targetThread !== 1) return -5;
+  return registerBeforeUnloadEventCallback(2, userData, true, callbackfunc, 28, "beforeunload");
+}
+
 var registerFocusEventCallback = (target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) => {
   targetThread = JSEvents.getTargetThreadForEventCallback(targetThread);
   var eventSize = 256;
@@ -9609,7 +10062,7 @@ var registerFocusEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_blur_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(36, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(40, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9643,7 +10096,7 @@ var setCanvasElementSizeCallingThread = (target, width, height) => {
 };
 
 function setCanvasElementSizeMainThread(target, width, height) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(37, 0, 1, target, width, height);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(41, 0, 1, target, width, height);
   return setCanvasElementSizeCallingThread(target, width, height);
 }
 
@@ -9657,7 +10110,7 @@ function _emscripten_set_canvas_element_size(target, width, height) {
 }
 
 function _emscripten_set_focus_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(38, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(42, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9702,7 +10155,7 @@ var registerKeyEventCallback = (target, userData, useCapture, callbackfunc, even
 };
 
 function _emscripten_set_keydown_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(39, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(43, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9711,7 +10164,7 @@ function _emscripten_set_keydown_callback_on_thread(target, userData, useCapture
 }
 
 function _emscripten_set_keypress_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(40, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(44, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9720,7 +10173,7 @@ function _emscripten_set_keypress_callback_on_thread(target, userData, useCaptur
 }
 
 function _emscripten_set_keyup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(41, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(45, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9784,7 +10237,7 @@ var registerMouseEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_mousedown_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(42, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(46, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9793,7 +10246,7 @@ function _emscripten_set_mousedown_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_mouseenter_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(43, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(47, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9802,7 +10255,7 @@ function _emscripten_set_mouseenter_callback_on_thread(target, userData, useCapt
 }
 
 function _emscripten_set_mouseleave_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(44, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(48, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9811,7 +10264,7 @@ function _emscripten_set_mouseleave_callback_on_thread(target, userData, useCapt
 }
 
 function _emscripten_set_mousemove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(45, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(49, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9820,7 +10273,7 @@ function _emscripten_set_mousemove_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_mouseup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(46, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(50, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9899,7 +10352,7 @@ var registerTouchEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_touchcancel_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(47, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(51, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9908,7 +10361,7 @@ function _emscripten_set_touchcancel_callback_on_thread(target, userData, useCap
 }
 
 function _emscripten_set_touchend_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(48, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(52, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9917,7 +10370,7 @@ function _emscripten_set_touchend_callback_on_thread(target, userData, useCaptur
 }
 
 function _emscripten_set_touchmove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(49, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(53, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9926,7 +10379,7 @@ function _emscripten_set_touchmove_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_touchstart_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(50, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(54, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -9962,7 +10415,7 @@ var registerWheelEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_wheel_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(51, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(55, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10116,7 +10569,7 @@ var getEnvStrings = () => {
 };
 
 function _environ_get(__environ, environ_buf) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(52, 0, 1, __environ, environ_buf);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(56, 0, 1, __environ, environ_buf);
   __environ >>>= 0;
   environ_buf >>>= 0;
   var bufSize = 0;
@@ -10131,7 +10584,7 @@ function _environ_get(__environ, environ_buf) {
 }
 
 function _environ_sizes_get(penviron_count, penviron_buf_size) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(53, 0, 1, penviron_count, penviron_buf_size);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(57, 0, 1, penviron_count, penviron_buf_size);
   penviron_count >>>= 0;
   penviron_buf_size >>>= 0;
   var strings = getEnvStrings();
@@ -10145,7 +10598,7 @@ function _environ_sizes_get(penviron_count, penviron_buf_size) {
 }
 
 function _fd_close(fd) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(54, 0, 1, fd);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(58, 0, 1, fd);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     FS.close(stream);
@@ -10175,7 +10628,7 @@ function _fd_close(fd) {
 };
 
 function _fd_read(fd, iov, iovcnt, pnum) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(55, 0, 1, fd, iov, iovcnt, pnum);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(59, 0, 1, fd, iov, iovcnt, pnum);
   iov >>>= 0;
   iovcnt >>>= 0;
   pnum >>>= 0;
@@ -10191,7 +10644,7 @@ function _fd_read(fd, iov, iovcnt, pnum) {
 }
 
 function _fd_seek(fd, offset, whence, newOffset) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(56, 0, 1, fd, offset, whence, newOffset);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(60, 0, 1, fd, offset, whence, newOffset);
   offset = bigintToI53Checked(offset);
   newOffset >>>= 0;
   try {
@@ -10229,7 +10682,7 @@ function _fd_seek(fd, offset, whence, newOffset) {
 };
 
 function _fd_write(fd, iov, iovcnt, pnum) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(57, 0, 1, fd, iov, iovcnt, pnum);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(61, 0, 1, fd, iov, iovcnt, pnum);
   iov >>>= 0;
   iovcnt >>>= 0;
   pnum >>>= 0;
@@ -10612,6 +11065,14 @@ var writeArrayToMemory = (array, buffer) => {
   return ret;
 };
 
+var FS_createPath = (...args) => FS.createPath(...args);
+
+var FS_unlink = (...args) => FS.unlink(...args);
+
+var FS_createLazyFile = (...args) => FS.createLazyFile(...args);
+
+var FS_createDevice = (...args) => FS.createDevice(...args);
+
 PThread.init();
 
 FS.createPreloadedFile = FS_createPreloadedFile;
@@ -10684,15 +11145,31 @@ for (/**@suppress{duplicate}*/ var i = 0; i <= 288; ++i) {
 }
 
 // Begin runtime exports
+Module["addRunDependency"] = addRunDependency;
+
+Module["removeRunDependency"] = removeRunDependency;
+
 Module["ccall"] = ccall;
+
+Module["FS_preloadFile"] = FS_preloadFile;
+
+Module["FS_unlink"] = FS_unlink;
+
+Module["FS_createPath"] = FS_createPath;
+
+Module["FS_createDevice"] = FS_createDevice;
 
 Module["FS"] = FS;
 
-var missingLibrarySymbols = [ "writeI53ToI64Clamped", "writeI53ToI64Signaling", "writeI53ToU64Clamped", "writeI53ToU64Signaling", "convertI32PairToI53", "convertI32PairToI53Checked", "convertU32PairToI53", "getTempRet0", "createNamedFunction", "withStackSave", "inetNtop4", "inetNtop6", "readSockaddr", "writeSockaddr", "runMainThreadEmAsm", "autoResumeAudioContext", "getDynCaller", "dynCall", "asmjsMangle", "HandleAllocator", "addOnInit", "addOnPostCtor", "addOnPreMain", "STACK_SIZE", "STACK_ALIGN", "POINTER_SIZE", "ASSERTIONS", "cwrap", "convertJsFunctionToWasm", "getEmptyTableSlot", "updateTableMap", "getFunctionAddress", "addFunction", "removeFunction", "intArrayToString", "AsciiToString", "stringToAscii", "UTF16ToString", "stringToUTF16", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "registerUiEventCallback", "fillDeviceOrientationEventData", "registerDeviceOrientationEventCallback", "fillDeviceMotionEventData", "registerDeviceMotionEventCallback", "screenOrientation", "fillOrientationChangeEventData", "registerOrientationChangeEventCallback", "fillFullscreenChangeEventData", "registerFullscreenChangeEventCallback", "JSEvents_requestFullscreen", "JSEvents_resizeCanvasForFullscreen", "registerRestoreOldStyle", "hideEverythingExceptGivenElement", "restoreHiddenElements", "setLetterbox", "softFullscreenResizeWebGLRenderTarget", "doRequestFullscreen", "fillPointerlockChangeEventData", "registerPointerlockChangeEventCallback", "registerPointerlockErrorEventCallback", "requestPointerLock", "fillVisibilityChangeEventData", "registerVisibilityChangeEventCallback", "fillGamepadEventData", "registerGamepadEventCallback", "registerBeforeUnloadEventCallback", "fillBatteryEventData", "registerBatteryEventCallback", "setCanvasElementSize", "getCanvasSizeCallingThread", "getCanvasSizeMainThread", "getCanvasElementSize", "convertPCtoSourceLocation", "wasiRightsToMuslOFlags", "wasiOFlagsToMuslOFlags", "setImmediateWrapped", "safeRequestAnimationFrame", "clearImmediateWrapped", "registerPostMainLoop", "registerPreMainLoop", "getPromise", "makePromise", "idsToPromises", "makePromiseCallback", "incrementUncaughtExceptionCount", "decrementUncaughtExceptionCount", "Browser_asyncPrepareDataCounter", "arraySum", "addDays", "getSocketFromFD", "getSocketAddress", "FS_mkdirTree", "_setNetworkCallback", "writeGLArray", "emscripten_webgl_destroy_context_before_on_calling_thread", "registerWebGlEventCallback", "runAndAbortIfError", "ALLOC_NORMAL", "ALLOC_STACK", "allocate", "writeStringToMemory", "writeAsciiToMemory", "allocateUTF8", "allocateUTF8OnStack", "demangle", "stackTrace", "getNativeTypeSize" ];
+Module["FS_createDataFile"] = FS_createDataFile;
+
+Module["FS_createLazyFile"] = FS_createLazyFile;
+
+var missingLibrarySymbols = [ "writeI53ToI64Clamped", "writeI53ToI64Signaling", "writeI53ToU64Clamped", "writeI53ToU64Signaling", "convertI32PairToI53", "convertI32PairToI53Checked", "convertU32PairToI53", "getTempRet0", "createNamedFunction", "withStackSave", "inetNtop4", "inetNtop6", "readSockaddr", "writeSockaddr", "runMainThreadEmAsm", "autoResumeAudioContext", "getDynCaller", "dynCall", "asmjsMangle", "HandleAllocator", "addOnInit", "addOnPostCtor", "addOnPreMain", "STACK_SIZE", "STACK_ALIGN", "POINTER_SIZE", "ASSERTIONS", "cwrap", "convertJsFunctionToWasm", "getEmptyTableSlot", "updateTableMap", "getFunctionAddress", "addFunction", "removeFunction", "intArrayToString", "AsciiToString", "stringToAscii", "UTF16ToString", "stringToUTF16", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "registerUiEventCallback", "fillDeviceOrientationEventData", "registerDeviceOrientationEventCallback", "fillDeviceMotionEventData", "registerDeviceMotionEventCallback", "screenOrientation", "fillOrientationChangeEventData", "registerOrientationChangeEventCallback", "fillFullscreenChangeEventData", "registerFullscreenChangeEventCallback", "JSEvents_requestFullscreen", "JSEvents_resizeCanvasForFullscreen", "registerRestoreOldStyle", "hideEverythingExceptGivenElement", "restoreHiddenElements", "setLetterbox", "softFullscreenResizeWebGLRenderTarget", "doRequestFullscreen", "fillPointerlockChangeEventData", "registerPointerlockChangeEventCallback", "registerPointerlockErrorEventCallback", "requestPointerLock", "fillVisibilityChangeEventData", "registerVisibilityChangeEventCallback", "fillGamepadEventData", "registerGamepadEventCallback", "fillBatteryEventData", "registerBatteryEventCallback", "setCanvasElementSize", "getCanvasSizeCallingThread", "getCanvasSizeMainThread", "getCanvasElementSize", "convertPCtoSourceLocation", "wasiRightsToMuslOFlags", "wasiOFlagsToMuslOFlags", "setImmediateWrapped", "safeRequestAnimationFrame", "clearImmediateWrapped", "registerPostMainLoop", "registerPreMainLoop", "getPromise", "makePromise", "idsToPromises", "makePromiseCallback", "incrementUncaughtExceptionCount", "decrementUncaughtExceptionCount", "Browser_asyncPrepareDataCounter", "arraySum", "addDays", "getSocketFromFD", "getSocketAddress", "FS_mkdirTree", "_setNetworkCallback", "writeGLArray", "emscripten_webgl_destroy_context_before_on_calling_thread", "registerWebGlEventCallback", "runAndAbortIfError", "ALLOC_NORMAL", "ALLOC_STACK", "allocate", "writeStringToMemory", "writeAsciiToMemory", "allocateUTF8", "allocateUTF8OnStack", "demangle", "stackTrace", "getNativeTypeSize" ];
 
 missingLibrarySymbols.forEach(missingLibrarySymbol);
 
-var unexportedSymbols = [ "run", "out", "err", "callMain", "abort", "wasmExports", "writeStackCookie", "checkStackCookie", "writeI53ToI64", "readI53FromI64", "readI53FromU64", "INT53_MAX", "INT53_MIN", "bigintToI53Checked", "HEAP8", "HEAPU8", "HEAP16", "HEAPU16", "HEAP32", "HEAPU32", "HEAPF32", "HEAPF64", "HEAP64", "HEAPU64", "stackSave", "stackRestore", "stackAlloc", "setTempRet0", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "growMemory", "ENV", "setStackLimits", "ERRNO_CODES", "strError", "inetPton4", "inetPton6", "DNS", "Protocols", "Sockets", "timers", "warnOnce", "readEmAsmArgsArray", "readEmAsmArgs", "runEmAsmFunction", "jstoi_q", "getExecutableName", "handleException", "keepRuntimeAlive", "runtimeKeepalivePush", "runtimeKeepalivePop", "callUserCallback", "maybeExit", "asyncLoad", "alignMemory", "mmapAlloc", "wasmTable", "wasmMemory", "getUniqueRunDependency", "noExitRuntime", "addRunDependency", "removeRunDependency", "addOnPreRun", "addOnExit", "addOnPostRun", "freeTableIndexes", "functionsInTableMap", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "UTF16Decoder", "stringToNewUTF8", "stringToUTF8OnStack", "writeArrayToMemory", "JSEvents", "registerKeyEventCallback", "specialHTMLTargets", "maybeCStringToJsString", "findEventTarget", "findCanvasEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerMouseEventCallback", "registerWheelEventCallback", "registerFocusEventCallback", "currentFullscreenStrategy", "restoreOldWindowedStyle", "registerTouchEventCallback", "setCanvasElementSizeCallingThread", "setCanvasElementSizeMainThread", "jsStackTrace", "getCallstack", "UNWIND_CACHE", "ExitStatus", "getEnvStrings", "checkWasiClock", "doReadv", "doWritev", "initRandomFill", "randomFill", "safeSetTimeout", "emSetImmediate", "emClearImmediate_deps", "emClearImmediate", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "findMatchingCatch", "getExceptionMessageCommon", "incrementExceptionRefcount", "decrementExceptionRefcount", "getExceptionMessage", "Browser", "requestFullscreen", "requestFullScreen", "setCanvasSize", "getUserMedia", "createContext", "getPreloadedImageData__data", "wget", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "isLeapYear", "ydayFromDate", "SYSCALLS", "preloadPlugins", "FS_createPreloadedFile", "FS_preloadFile", "FS_modeStringToFlags", "FS_getMode", "FS_fileDataToTypedArray", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_unlink", "FS_createPath", "FS_createDevice", "FS_readFile", "FS_root", "FS_mounts", "FS_devices", "FS_streams", "FS_nextInode", "FS_nameTable", "FS_currentPath", "FS_initialized", "FS_ignorePermissions", "FS_filesystems", "FS_syncFSRequests", "FS_lookupPath", "FS_getPath", "FS_hashName", "FS_hashAddNode", "FS_hashRemoveNode", "FS_lookupNode", "FS_createNode", "FS_destroyNode", "FS_isRoot", "FS_isMountpoint", "FS_isFile", "FS_isDir", "FS_isLink", "FS_isChrdev", "FS_isBlkdev", "FS_isFIFO", "FS_isSocket", "FS_flagsToPermissionString", "FS_nodePermissions", "FS_mayLookup", "FS_mayCreate", "FS_mayDelete", "FS_mayOpen", "FS_checkOpExists", "FS_nextfd", "FS_getStreamChecked", "FS_getStream", "FS_createStream", "FS_closeStream", "FS_dupStream", "FS_doSetAttr", "FS_chrdev_stream_ops", "FS_major", "FS_minor", "FS_makedev", "FS_registerDevice", "FS_getDevice", "FS_getMounts", "FS_syncfs", "FS_mount", "FS_unmount", "FS_lookup", "FS_mknod", "FS_statfs", "FS_statfsStream", "FS_statfsNode", "FS_create", "FS_mkdir", "FS_mkdev", "FS_symlink", "FS_rename", "FS_rmdir", "FS_readdir", "FS_readlink", "FS_stat", "FS_fstat", "FS_lstat", "FS_doChmod", "FS_chmod", "FS_lchmod", "FS_fchmod", "FS_doChown", "FS_chown", "FS_lchown", "FS_fchown", "FS_doTruncate", "FS_truncate", "FS_ftruncate", "FS_utime", "FS_open", "FS_close", "FS_isClosed", "FS_llseek", "FS_read", "FS_write", "FS_mmap", "FS_msync", "FS_ioctl", "FS_writeFile", "FS_cwd", "FS_chdir", "FS_createDefaultDirectories", "FS_createDefaultDevices", "FS_createSpecialDirectories", "FS_createStandardStreams", "FS_staticInit", "FS_init", "FS_quit", "FS_findObject", "FS_analyzePath", "FS_createFile", "FS_createDataFile", "FS_forceLoadFile", "FS_createLazyFile", "MEMFS", "TTY", "PIPEFS", "SOCKFS", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_WEBGL_multi_draw", "webgl_enable_EXT_polygon_offset_clamp", "webgl_enable_EXT_clip_control", "webgl_enable_WEBGL_polygon_mode", "GL", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "waitAsyncPolyfilled", "emscriptenWebGLGetIndexed", "webgl_enable_WEBGL_draw_instanced_base_vertex_base_instance", "webgl_enable_WEBGL_multi_draw_instanced_base_vertex_base_instance", "print", "printErr", "jstoi_s", "PThread", "terminateWorker", "cleanupThread", "registerTLSInit", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox" ];
+var unexportedSymbols = [ "run", "out", "err", "callMain", "abort", "wasmExports", "writeStackCookie", "checkStackCookie", "writeI53ToI64", "readI53FromI64", "readI53FromU64", "INT53_MAX", "INT53_MIN", "bigintToI53Checked", "HEAP8", "HEAPU8", "HEAP16", "HEAPU16", "HEAP32", "HEAPU32", "HEAPF32", "HEAPF64", "HEAP64", "HEAPU64", "stackSave", "stackRestore", "stackAlloc", "setTempRet0", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "growMemory", "ENV", "setStackLimits", "ERRNO_CODES", "strError", "inetPton4", "inetPton6", "DNS", "Protocols", "Sockets", "timers", "warnOnce", "readEmAsmArgsArray", "readEmAsmArgs", "runEmAsmFunction", "jstoi_q", "getExecutableName", "handleException", "keepRuntimeAlive", "runtimeKeepalivePush", "runtimeKeepalivePop", "callUserCallback", "maybeExit", "asyncLoad", "alignMemory", "mmapAlloc", "wasmTable", "wasmMemory", "getUniqueRunDependency", "noExitRuntime", "addOnPreRun", "addOnExit", "addOnPostRun", "freeTableIndexes", "functionsInTableMap", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "UTF16Decoder", "stringToNewUTF8", "stringToUTF8OnStack", "writeArrayToMemory", "JSEvents", "registerKeyEventCallback", "specialHTMLTargets", "maybeCStringToJsString", "findEventTarget", "findCanvasEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerMouseEventCallback", "registerWheelEventCallback", "registerFocusEventCallback", "currentFullscreenStrategy", "restoreOldWindowedStyle", "registerTouchEventCallback", "registerBeforeUnloadEventCallback", "setCanvasElementSizeCallingThread", "setCanvasElementSizeMainThread", "jsStackTrace", "getCallstack", "UNWIND_CACHE", "ExitStatus", "getEnvStrings", "checkWasiClock", "doReadv", "doWritev", "initRandomFill", "randomFill", "safeSetTimeout", "emSetImmediate", "emClearImmediate_deps", "emClearImmediate", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "findMatchingCatch", "getExceptionMessageCommon", "incrementExceptionRefcount", "decrementExceptionRefcount", "getExceptionMessage", "Browser", "requestFullscreen", "requestFullScreen", "setCanvasSize", "getUserMedia", "createContext", "getPreloadedImageData__data", "wget", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "isLeapYear", "ydayFromDate", "SYSCALLS", "preloadPlugins", "FS_createPreloadedFile", "FS_modeStringToFlags", "FS_getMode", "FS_fileDataToTypedArray", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_readFile", "FS_root", "FS_mounts", "FS_devices", "FS_streams", "FS_nextInode", "FS_nameTable", "FS_currentPath", "FS_initialized", "FS_ignorePermissions", "FS_filesystems", "FS_syncFSRequests", "FS_lookupPath", "FS_getPath", "FS_hashName", "FS_hashAddNode", "FS_hashRemoveNode", "FS_lookupNode", "FS_createNode", "FS_destroyNode", "FS_isRoot", "FS_isMountpoint", "FS_isFile", "FS_isDir", "FS_isLink", "FS_isChrdev", "FS_isBlkdev", "FS_isFIFO", "FS_isSocket", "FS_flagsToPermissionString", "FS_nodePermissions", "FS_mayLookup", "FS_mayCreate", "FS_mayDelete", "FS_mayOpen", "FS_checkOpExists", "FS_nextfd", "FS_getStreamChecked", "FS_getStream", "FS_createStream", "FS_closeStream", "FS_dupStream", "FS_doSetAttr", "FS_chrdev_stream_ops", "FS_major", "FS_minor", "FS_makedev", "FS_registerDevice", "FS_getDevice", "FS_getMounts", "FS_syncfs", "FS_mount", "FS_unmount", "FS_lookup", "FS_mknod", "FS_statfs", "FS_statfsStream", "FS_statfsNode", "FS_create", "FS_mkdir", "FS_mkdev", "FS_symlink", "FS_rename", "FS_rmdir", "FS_readdir", "FS_readlink", "FS_stat", "FS_fstat", "FS_lstat", "FS_doChmod", "FS_chmod", "FS_lchmod", "FS_fchmod", "FS_doChown", "FS_chown", "FS_lchown", "FS_fchown", "FS_doTruncate", "FS_truncate", "FS_ftruncate", "FS_utime", "FS_open", "FS_close", "FS_isClosed", "FS_llseek", "FS_read", "FS_write", "FS_mmap", "FS_msync", "FS_ioctl", "FS_writeFile", "FS_cwd", "FS_chdir", "FS_createDefaultDirectories", "FS_createDefaultDevices", "FS_createSpecialDirectories", "FS_createStandardStreams", "FS_staticInit", "FS_init", "FS_quit", "FS_findObject", "FS_analyzePath", "FS_createFile", "FS_forceLoadFile", "MEMFS", "TTY", "PIPEFS", "SOCKFS", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_WEBGL_multi_draw", "webgl_enable_EXT_polygon_offset_clamp", "webgl_enable_EXT_clip_control", "webgl_enable_WEBGL_polygon_mode", "GL", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "waitAsyncPolyfilled", "emscriptenWebGLGetIndexed", "webgl_enable_WEBGL_draw_instanced_base_vertex_base_instance", "webgl_enable_WEBGL_multi_draw_instanced_base_vertex_base_instance", "print", "printErr", "jstoi_s", "PThread", "terminateWorker", "cleanupThread", "registerTLSInit", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox", "IDBFS" ];
 
 unexportedSymbols.forEach(unexportedRuntimeSymbol);
 
@@ -10704,7 +11181,7 @@ unexportedSymbols.forEach(unexportedRuntimeSymbol);
 // either synchronously or asynchronously from other threads in postMessage()d
 // or internally queued events. This way a pthread in a Worker can synchronously
 // access e.g. the DOM on the main thread.
-var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied, ___syscall_chmod, ___syscall_faccessat, ___syscall_fcntl64, ___syscall_fstat64, ___syscall_getdents64, ___syscall_ioctl, ___syscall_lstat64, ___syscall_mkdirat, ___syscall_newfstatat, ___syscall_openat, ___syscall_stat64, __mmap_js, __munmap_js, _eglBindAPI, _eglChooseConfig, _eglCreateContext, _eglCreateWindowSurface, _eglDestroyContext, _eglDestroySurface, _eglGetCurrentContext, _eglGetCurrentDisplay, _eglGetCurrentSurface, _eglGetDisplay, _eglGetError, _eglInitialize, _eglMakeCurrent, _eglQueryString, _eglQuerySurface, _eglSwapBuffers, _eglTerminate, _emscripten_get_device_pixel_ratio, _emscripten_get_element_css_size, _emscripten_get_preloaded_image_data, _emscripten_set_blur_callback_on_thread, setCanvasElementSizeMainThread, _emscripten_set_focus_callback_on_thread, _emscripten_set_keydown_callback_on_thread, _emscripten_set_keypress_callback_on_thread, _emscripten_set_keyup_callback_on_thread, _emscripten_set_mousedown_callback_on_thread, _emscripten_set_mouseenter_callback_on_thread, _emscripten_set_mouseleave_callback_on_thread, _emscripten_set_mousemove_callback_on_thread, _emscripten_set_mouseup_callback_on_thread, _emscripten_set_touchcancel_callback_on_thread, _emscripten_set_touchend_callback_on_thread, _emscripten_set_touchmove_callback_on_thread, _emscripten_set_touchstart_callback_on_thread, _emscripten_set_wheel_callback_on_thread, _environ_get, _environ_sizes_get, _fd_close, _fd_read, _fd_seek, _fd_write ];
+var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied, ___syscall_chmod, ___syscall_faccessat, ___syscall_fcntl64, ___syscall_fstat64, ___syscall_getdents64, ___syscall_ioctl, ___syscall_lstat64, ___syscall_mkdirat, ___syscall_newfstatat, ___syscall_openat, ___syscall_renameat, ___syscall_rmdir, ___syscall_stat64, ___syscall_unlinkat, __mmap_js, __munmap_js, _eglBindAPI, _eglChooseConfig, _eglCreateContext, _eglCreateWindowSurface, _eglDestroyContext, _eglDestroySurface, _eglGetCurrentContext, _eglGetCurrentDisplay, _eglGetCurrentSurface, _eglGetDisplay, _eglGetError, _eglInitialize, _eglMakeCurrent, _eglQueryString, _eglQuerySurface, _eglSwapBuffers, _eglTerminate, _emscripten_get_device_pixel_ratio, _emscripten_get_element_css_size, _emscripten_get_preloaded_image_data, _emscripten_set_beforeunload_callback_on_thread, _emscripten_set_blur_callback_on_thread, setCanvasElementSizeMainThread, _emscripten_set_focus_callback_on_thread, _emscripten_set_keydown_callback_on_thread, _emscripten_set_keypress_callback_on_thread, _emscripten_set_keyup_callback_on_thread, _emscripten_set_mousedown_callback_on_thread, _emscripten_set_mouseenter_callback_on_thread, _emscripten_set_mouseleave_callback_on_thread, _emscripten_set_mousemove_callback_on_thread, _emscripten_set_mouseup_callback_on_thread, _emscripten_set_touchcancel_callback_on_thread, _emscripten_set_touchend_callback_on_thread, _emscripten_set_touchmove_callback_on_thread, _emscripten_set_touchstart_callback_on_thread, _emscripten_set_wheel_callback_on_thread, _environ_get, _environ_sizes_get, _fd_close, _fd_read, _fd_seek, _fd_write ];
 
 function checkIncomingModuleAPI() {
   ignoredModuleProp("fetchSettings");
@@ -10717,13 +11194,18 @@ function checkIncomingModuleAPI() {
 }
 
 var ASM_CONSTS = {
-  3460509: () => {
+  3463841: () => {
     CascadeScopeFileUpload.requestOpen();
   },
-  3460551: ($0, $1) => {
+  3463883: ($0, $1) => {
+    if (typeof CascadeScopeFileDownload !== "undefined" && CascadeScopeFileDownload.trigger) {
+      CascadeScopeFileDownload.trigger(UTF8ToString($0), UTF8ToString($1));
+    }
+  },
+  3464050: ($0, $1) => {
     alert(UTF8ToString($0) + ": " + UTF8ToString($1));
   },
-  3460606: () => {
+  3464105: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -10734,7 +11216,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientWidth > 0 ? canvas.clientWidth : 0;
   },
-  3460837: () => {
+  3464336: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -10745,14 +11227,32 @@ var ASM_CONSTS = {
     }
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
-  3461072: () => {
+  3464571: () => {
+    if (Module.FS && Module.FS.syncfs) {
+      Module.FS.syncfs(false, function(err) {
+        if (err) {
+          console.warn("IDBFS imgui.ini persist failed:", err);
+        }
+      });
+    }
+  },
+  3464725: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  3461158: ($0, $1, $2, $3) => {
+  3464811: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
+  },
+  3464906: () => {
+    if (Module.FS && Module.FS.syncfs) {
+      Module.FS.syncfs(false, function(err) {
+        if (err) {
+          console.warn("IDBFS persist failed:", err);
+        }
+      });
+    }
   }
 };
 
@@ -10983,7 +11483,10 @@ function assignWasmImports() {
     /** @export */ __syscall_mkdirat: ___syscall_mkdirat,
     /** @export */ __syscall_newfstatat: ___syscall_newfstatat,
     /** @export */ __syscall_openat: ___syscall_openat,
+    /** @export */ __syscall_renameat: ___syscall_renameat,
+    /** @export */ __syscall_rmdir: ___syscall_rmdir,
     /** @export */ __syscall_stat64: ___syscall_stat64,
+    /** @export */ __syscall_unlinkat: ___syscall_unlinkat,
     /** @export */ _abort_js: __abort_js,
     /** @export */ _emscripten_init_main_thread_js: __emscripten_init_main_thread_js,
     /** @export */ _emscripten_lookup_name: __emscripten_lookup_name,
@@ -11311,6 +11814,7 @@ function assignWasmImports() {
     /** @export */ emscripten_num_logical_cores: _emscripten_num_logical_cores,
     /** @export */ emscripten_performance_now: _emscripten_performance_now,
     /** @export */ emscripten_resize_heap: _emscripten_resize_heap,
+    /** @export */ emscripten_set_beforeunload_callback_on_thread: _emscripten_set_beforeunload_callback_on_thread,
     /** @export */ emscripten_set_blur_callback_on_thread: _emscripten_set_blur_callback_on_thread,
     /** @export */ emscripten_set_canvas_element_size: _emscripten_set_canvas_element_size,
     /** @export */ emscripten_set_focus_callback_on_thread: _emscripten_set_focus_callback_on_thread,
