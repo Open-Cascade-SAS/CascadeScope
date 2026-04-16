@@ -281,7 +281,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776335586';
+    var CascadeScopeBuildStamp = '1776341252';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -307,8 +307,23 @@
     var cascadeScopeSyncfsBusy = false;
     var CASCADESCOPE_SYNCFS_PERSIST_TIMEOUT_MS = 5000;
     var CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS = 6000;
-    var CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS = 3;
-    var CASCADESCOPE_COI_RELOAD_COUNTER_KEY = 'CascadeScopeCoiReloadAttempts';
+    // Cache-bypass sentinel added by our override of coi-serviceworker's
+    // doReload.  When the SW is freshly installed, a plain location.reload()
+    // may be served from the HTTP cache without going through the SW (Safari
+    // is the worst offender).  Navigating to the same URL with ?_csr=<ts>
+    // forces the browser to do a fresh network fetch, which the installed SW
+    // intercepts and decorates with COOP/COEP headers.
+    var CASCADESCOPE_COI_CSR_PARAM = '_csr';
+    // Recovery sentinel added when we detect a stale SW: the page is
+    // controlled by a SW but crossOriginIsolated is still false (typical on
+    // Safari Cmd+R).  We unregister the SW and redirect with _coi=1 so that
+    // the NEXT load has no controller — coi-serviceworker.js will then do a
+    // fresh register → install → claim → doReload cycle.
+    var CASCADESCOPE_COI_RECOVERY_PARAM = '_coi';
+    // Cap on how long we wait for coi-serviceworker.js's own register+reload
+    // cycle to take over before we fall back to showing an error.  A healthy
+    // SW registers in tens of milliseconds; 2.5 s is a pessimistic ceiling.
+    var CASCADESCOPE_COI_BOOTSTRAP_TIMEOUT_MS = 2500;
     function cascadeScopeDrainSyncfsQueue() {
       if (cascadeScopeSyncfsBusy || cascadeScopeSyncfsQueue.length === 0) {
         return;
@@ -485,57 +500,22 @@
     };
   </script>
   <script>
-    // Override coi-serviceworker.js's `doReload` so the reload it fires right
-    // after installing the SW is a cache-BYPASSING reload. Background: the
-    // first-ever navigation for a visitor does not go through any SW, so the
-    // HTML response lands in the browser's HTTP cache WITHOUT the COOP/COEP
-    // headers. A plain `location.reload()` can be served straight from that
-    // cache, so crossOriginIsolated stays false and we loop forever.
-    // Redirecting to the same URL with a unique `_csr` query forces the
-    // browser to issue a fresh network fetch — which now goes through the SW
-    // and gets the headers attached. coi-serviceworker.js reads `window.coi`
-    // at its line 77 (`...window.coi` spread into its defaults), so this
-    // override MUST be declared BEFORE the `<script src="coi-serviceworker.js">`
-    // tag below.
-    function cascadeScopeGetCoiReloadAttempts() {
-      try {
-        return parseInt(sessionStorage.getItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY), 10) || 0;
-      } catch (e) {
-        return 0;
-      }
-    }
-
-    function cascadeScopeSetCoiReloadAttempts(theAttempts) {
-      try {
-        sessionStorage.setItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY, String(theAttempts));
-      } catch (e) {}
-    }
-
-    function cascadeScopeResetCoiReloadAttempts() {
-      try {
-        sessionStorage.removeItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY);
-      } catch (e) {}
-    }
-
-    function cascadeScopeReloadWithCacheBypass(theReason) {
+    // Override coi-serviceworker.js's doReload so the reload it fires right
+    // after installing the SW is a cache-BYPASSING navigation.  A plain
+    // location.reload() can be served from the HTTP cache of the first
+    // (SW-less, header-less) response, which leaves crossOriginIsolated=false
+    // and the page loops.  Adding ?_csr=<timestamp> creates a distinct URL
+    // that the browser must fetch fresh — and the newly-installed SW adds
+    // the COOP/COEP headers on that fresh response.  coi-serviceworker.js
+    // reads window.coi at its line 77, so the override must be declared
+    // BEFORE the <script src="coi-serviceworker.js"> tag below.
+    function cascadeScopeReloadWithCacheBypass() {
       var aUrl = new URL(location.href);
-      var anAttempts = cascadeScopeGetCoiReloadAttempts();
-      if (anAttempts >= CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS) {
-        console.warn('CascadeScope: skip extra COI reload (' + theReason
-          + ') because the retry limit (' + CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS
-          + ') was reached.');
-        return false;
-      }
-      cascadeScopeSetCoiReloadAttempts(anAttempts + 1);
-      aUrl.searchParams.set('_csr', Date.now().toString());
+      aUrl.searchParams.set(CASCADESCOPE_COI_CSR_PARAM, Date.now().toString());
       location.replace(aUrl.href);
-      return true;
     }
-
     window.coi = {
-      doReload: function () {
-        cascadeScopeReloadWithCacheBypass('coi-serviceworker');
-      }
+      doReload: cascadeScopeReloadWithCacheBypass
     };
   </script>
   <!-- No cache-buster query here: the URL used to register the Service Worker
@@ -545,6 +525,45 @@
        refreshed by the browser's built-in byte-compare update path on register(),
        so the cache-buster here was never load-bearing. -->
   <script src="coi-serviceworker.js"></script>
+  <script>
+    // Safari (and sometimes Chromium with aggressive caching) sends the Cmd+R
+    // navigation straight from the HTTP cache without routing through the SW,
+    // so the cached header-less response is served and crossOriginIsolated
+    // ends up false even though a SW is registered.
+    //
+    // Recovery: if a controller exists but COI is off, unregister the SW and
+    // redirect to ?_coi=1.  The next load has no controller, coi-serviceworker
+    // re-registers cleanly, and its doReload fires a fresh ?_csr= navigation
+    // that the SW intercepts — restoring COI.
+    //
+    // Seeing ?_coi=1 in the URL on entry means we just came out of the
+    // unregister step; strip it and do nothing else — coi-serviceworker is
+    // about to take over.
+    (function () {
+      if (window.crossOriginIsolated || !navigator.serviceWorker) {
+        return;
+      }
+      var aUrl = new URL(location.href);
+      if (aUrl.searchParams.has(CASCADESCOPE_COI_RECOVERY_PARAM)) {
+        aUrl.searchParams.delete(CASCADESCOPE_COI_RECOVERY_PARAM);
+        history.replaceState(null, '', aUrl.href);
+        return;
+      }
+      if (!navigator.serviceWorker.controller) {
+        return;
+      }
+      CascadeScopeShell.setStatus('Re-establishing cross-origin isolation...');
+      navigator.serviceWorker.getRegistrations().then(function (theRegs) {
+        return Promise.all(theRegs.map(function (theReg) {
+          return theReg.unregister().catch(function () { return null; });
+        }));
+      }).then(function () {
+        var aFreshUrl = new URL(location.href);
+        aFreshUrl.searchParams.set(CASCADESCOPE_COI_RECOVERY_PARAM, '1');
+        location.replace(aFreshUrl.href);
+      });
+    })();
+  </script>
   <!-- <script async type="text/javascript" src="CascadeScope.js"></script> -->
   <script>
     // Load CascadeScope.js only in a cross-origin-isolated context. With
@@ -554,28 +573,44 @@
     // cascades into std::system_error from std::async calls in the C++ app,
     // aborting the wasm runtime.
     //
-    // We used to gate this unconditionally (commit c69d553), which caused an
-    // endless "Loading..." hang when the gate stayed closed across a reload:
-    // if coi-serviceworker.js's doReload() arrived before the SW had claimed
-    // the page, we'd land back here with crossOriginIsolated still false and
-    // no path out. The fix is to ALSO arm a fallback reload ourselves so the
-    // gate is guaranteed to converge to `true` eventually, regardless of
-    // whether the SW claim race goes our way or not.
+    // Control flow (all driven by coi-serviceworker.js + the recovery script
+    // above; no retry counter, no setTimeout race against the SW claim):
+    //   - COI=true                              → strip _csr/_coi, load module.
+    //   - COI=false, no navigator.serviceWorker → show error, stop.
+    //   - COI=false otherwise                   → wait. coi-serviceworker.js
+    //                                             registers the SW and then
+    //                                             calls its doReload (we
+    //                                             override it to do a cache-
+    //                                             bypassing ?_csr=<ts> reload).
+    //                                             On the reloaded page the
+    //                                             navigation fetch flows
+    //                                             through the SW, headers are
+    //                                             attached, and we land back
+    //                                             here with COI=on.
+    //
+    // A failsafe surfaces an error if no reload fires within the budget.
     (function () {
       function aAppendModule() {
         var aScript = document.createElement('script');
         aScript.async = true;
         aScript.type = 'text/javascript';
-        aScript.src = 'CascadeScope.js?v=1776335586';
+        aScript.src = 'CascadeScope.js?v=1776341252';
         document.body.appendChild(aScript);
       }
 
       if (window.crossOriginIsolated) {
         var aCleanUrl = new URL(location.href);
-        cascadeScopeResetCoiReloadAttempts();
-        if (aCleanUrl.searchParams.has('_csr')) {
-          aCleanUrl.searchParams.delete('_csr');
-          history.replaceState(null, '', aCleanUrl);
+        var aHasChange = false;
+        if (aCleanUrl.searchParams.has(CASCADESCOPE_COI_CSR_PARAM)) {
+          aCleanUrl.searchParams.delete(CASCADESCOPE_COI_CSR_PARAM);
+          aHasChange = true;
+        }
+        if (aCleanUrl.searchParams.has(CASCADESCOPE_COI_RECOVERY_PARAM)) {
+          aCleanUrl.searchParams.delete(CASCADESCOPE_COI_RECOVERY_PARAM);
+          aHasChange = true;
+        }
+        if (aHasChange) {
+          history.replaceState(null, '', aCleanUrl.href);
         }
         aAppendModule();
         return;
@@ -588,25 +623,20 @@
         return;
       }
 
-      // Tell the user what's happening so they don't stare at an empty canvas.
       CascadeScopeShell.setStatus('Enabling cross-origin isolation...');
 
-      // If a service worker already controls the page but COI is still off,
-      // coi-serviceworker.js will normally call reload() itself within ~1 s.
-      // Give it a short grace period before we step in, otherwise we race the
-      // SW's own reload and waste a retry slot on the warm-load happy path.
-      // If no controller exists yet, fall back to the original 2.5 s budget
-      // to cover the cold-claim case.
-      var aReloadDelayMs = navigator.serviceWorker.controller ? 800 : 2500;
+      // Failsafe: if neither coi-serviceworker's doReload nor our recovery
+      // script fires a reload within the budget, surface an actionable error
+      // so the user isn't left staring at "Enabling..." forever. This is a
+      // diagnostic, not a retry — it fires at most once per load.
       setTimeout(function () {
         if (!window.crossOriginIsolated) {
-          var wasReloaded = cascadeScopeReloadWithCacheBypass('bootstrap-timeout');
-          if (!wasReloaded) {
-            CascadeScopeShell.setStatus('Unable to enable cross-origin isolation. '
-              + 'Please clear site data and reload.');
-          }
+          CascadeScopeShell.setStatus('Unable to enable cross-origin isolation. '
+            + 'Try a hard refresh, or open the page in a new tab or different '
+            + 'browser. If the problem persists, the deployment is not serving '
+            + 'the required COOP/COEP headers.');
         }
-      }, aReloadDelayMs);
+      }, CASCADESCOPE_COI_BOOTSTRAP_TIMEOUT_MS);
     })();
   </script>
 </body>
