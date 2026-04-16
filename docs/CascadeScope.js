@@ -1005,65 +1005,6 @@ var onPreRuns = [];
 
 var addOnPreRun = cb => onPreRuns.push(cb);
 
-var runDependencies = 0;
-
-var dependenciesFulfilled = null;
-
-var runDependencyTracking = {};
-
-var runDependencyWatcher = null;
-
-var removeRunDependency = id => {
-  runDependencies--;
-  Module["monitorRunDependencies"]?.(runDependencies);
-  assert(id, "removeRunDependency requires an ID");
-  assert(runDependencyTracking[id]);
-  delete runDependencyTracking[id];
-  if (runDependencies == 0) {
-    if (runDependencyWatcher !== null) {
-      clearInterval(runDependencyWatcher);
-      runDependencyWatcher = null;
-    }
-    if (dependenciesFulfilled) {
-      var callback = dependenciesFulfilled;
-      dependenciesFulfilled = null;
-      callback();
-    }
-  }
-};
-
-var addRunDependency = id => {
-  runDependencies++;
-  Module["monitorRunDependencies"]?.(runDependencies);
-  assert(id, "addRunDependency requires an ID");
-  assert(!runDependencyTracking[id]);
-  runDependencyTracking[id] = 1;
-  if (runDependencyWatcher === null && globalThis.setInterval) {
-    // Check for missing dependencies every few seconds
-    runDependencyWatcher = setInterval(() => {
-      if (ABORT) {
-        clearInterval(runDependencyWatcher);
-        runDependencyWatcher = null;
-        return;
-      }
-      var shown = false;
-      for (var dep in runDependencyTracking) {
-        if (!shown) {
-          shown = true;
-          err("still waiting on run dependencies:");
-        }
-        err(`dependency: ${dep}`);
-      }
-      if (shown) {
-        err("(end of list)");
-      }
-    }, 1e4);
-    // Prevent this timer from keeping the runtime alive if nothing
-    // else is.
-    runDependencyWatcher.unref?.();
-  }
-};
-
 var spawnThread = threadParams => {
   assert(!ENVIRONMENT_IS_PTHREAD, "Internal Error! spawnThread() can only ever be called from main application thread!");
   assert(threadParams.pthread_ptr, "Internal error, no pthread ptr!");
@@ -1212,9 +1153,6 @@ var PThread = {
     // in postamble_minimal.js
     addOnPreRun(async () => {
       var pthreadPoolReady = PThread.loadWasmModuleToAllWorkers();
-      addRunDependency("loading-workers");
-      await pthreadPoolReady;
-      removeRunDependency("loading-workers");
     });
   },
   terminateAllThreads: () => {
@@ -1353,7 +1291,12 @@ var PThread = {
       return;
     }
     let pthreadPoolReady = Promise.all(PThread.unusedWorkers.map(PThread.loadWasmModuleToWorker));
-    return pthreadPoolReady;
+    // PTHREAD_POOL_DELAY_LOAD means we want to proceed synchronously without
+    // waiting for the pthread pool during the startup phase.
+    // If the user wants to wait on it elsewhere, they can do so via the
+    // Module['pthreadPoolReady'] promise.
+    Module["pthreadPoolReady"] = pthreadPoolReady;
+    return;
   },
   allocateUnusedWorker() {
     var worker;
@@ -1395,6 +1338,65 @@ var PThread = {
 var onPostRuns = [];
 
 var addOnPostRun = cb => onPostRuns.push(cb);
+
+var runDependencies = 0;
+
+var dependenciesFulfilled = null;
+
+var runDependencyTracking = {};
+
+var runDependencyWatcher = null;
+
+var removeRunDependency = id => {
+  runDependencies--;
+  Module["monitorRunDependencies"]?.(runDependencies);
+  assert(id, "removeRunDependency requires an ID");
+  assert(runDependencyTracking[id]);
+  delete runDependencyTracking[id];
+  if (runDependencies == 0) {
+    if (runDependencyWatcher !== null) {
+      clearInterval(runDependencyWatcher);
+      runDependencyWatcher = null;
+    }
+    if (dependenciesFulfilled) {
+      var callback = dependenciesFulfilled;
+      dependenciesFulfilled = null;
+      callback();
+    }
+  }
+};
+
+var addRunDependency = id => {
+  runDependencies++;
+  Module["monitorRunDependencies"]?.(runDependencies);
+  assert(id, "addRunDependency requires an ID");
+  assert(!runDependencyTracking[id]);
+  runDependencyTracking[id] = 1;
+  if (runDependencyWatcher === null && globalThis.setInterval) {
+    // Check for missing dependencies every few seconds
+    runDependencyWatcher = setInterval(() => {
+      if (ABORT) {
+        clearInterval(runDependencyWatcher);
+        runDependencyWatcher = null;
+        return;
+      }
+      var shown = false;
+      for (var dep in runDependencyTracking) {
+        if (!shown) {
+          shown = true;
+          err("still waiting on run dependencies:");
+        }
+        err(`dependency: ${dep}`);
+      }
+      if (shown) {
+        err("(end of list)");
+      }
+    }, 1e4);
+    // Prevent this timer from keeping the runtime alive if nothing
+    // else is.
+    runDependencyWatcher.unref?.();
+  }
+};
 
 function establishStackSpace(pthread_ptr) {
   var stackHigh = (growMemViews(), HEAPU32)[(((pthread_ptr) + (48)) >>> 2) >>> 0];
@@ -11228,7 +11230,13 @@ var ASM_CONSTS = {
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
   3464635: () => {
-    if (Module.FS && Module.FS.syncfs) {
+    if (Module.syncfsPersist) {
+      Module.syncfsPersist(function(err) {
+        if (err) {
+          console.warn("IDBFS imgui.ini persist failed:", err);
+        }
+      });
+    } else if (Module.FS && Module.FS.syncfs) {
       Module.FS.syncfs(false, function(err) {
         if (err) {
           console.warn("IDBFS imgui.ini persist failed:", err);
@@ -11236,17 +11244,23 @@ var ASM_CONSTS = {
       });
     }
   },
-  3464789: () => {
+  3464932: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  3464875: ($0, $1, $2, $3) => {
+  3465018: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
   },
-  3464970: () => {
-    if (Module.FS && Module.FS.syncfs) {
+  3465113: () => {
+    if (Module.syncfsPersist) {
+      Module.syncfsPersist(function(err) {
+        if (err) {
+          console.warn("IDBFS persist failed:", err);
+        }
+      });
+    } else if (Module.FS && Module.FS.syncfs) {
       Module.FS.syncfs(false, function(err) {
         if (err) {
           console.warn("IDBFS persist failed:", err);

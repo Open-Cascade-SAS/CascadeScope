@@ -281,7 +281,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776289675';
+    var CascadeScopeBuildStamp = '1776332204';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -290,8 +290,94 @@
       return path + separator + 'v=' + CascadeScopeBuildStamp;
     }
 
+    // Tracks the set of currently-open Emscripten run dependencies by name.
+    // We hook addRunDependency/removeRunDependency below so the set stays in
+    // sync with Emscripten's internal counter and we can report exactly what
+    // is blocking the boot when Loading... persists (A1 in the plan).
+    var cascadeScopePendingDeps = new Set();
+    var cascadeScopeStuckDepWatchdog = null;
+
+    // FIFO queue so that at most one FS.syncfs(false, ...) is in flight at
+    // a time.  Two persistence paths can fire on the same Save() tick
+    // (writeAtomic + imgui.ini flush); allowing them to overlap has been
+    // observed to leave the IndexedDB transaction pool in a state where a
+    // subsequent FS.syncfs(true, ...) hydrate never reports back.  This
+    // helper (B in the plan) removes that overlap.
+    var cascadeScopeSyncfsQueue = [];
+    var cascadeScopeSyncfsBusy = false;
+    var CASCADESCOPE_SYNCFS_PERSIST_TIMEOUT_MS = 5000;
+    var CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS = 6000;
+    function cascadeScopeDrainSyncfsQueue() {
+      if (cascadeScopeSyncfsBusy || cascadeScopeSyncfsQueue.length === 0) {
+        return;
+      }
+      if (!(Module.FS && Module.FS.syncfs)) {
+        cascadeScopeSyncfsQueue.length = 0;
+        return;
+      }
+      cascadeScopeSyncfsBusy = true;
+      var done = cascadeScopeSyncfsQueue.shift();
+      var isSettled = false;
+      var watchdog = setTimeout(function() {
+        if (isSettled) {
+          return;
+        }
+        isSettled = true;
+        cascadeScopeSyncfsBusy = false;
+        try {
+          if (done) {
+            done(new Error('IDBFS persist timed out after '
+              + CASCADESCOPE_SYNCFS_PERSIST_TIMEOUT_MS + 'ms'));
+          }
+        } finally {
+          cascadeScopeDrainSyncfsQueue();
+        }
+      }, CASCADESCOPE_SYNCFS_PERSIST_TIMEOUT_MS);
+      Module.FS.syncfs(false, function(err) {
+        if (isSettled) {
+          return;
+        }
+        isSettled = true;
+        clearTimeout(watchdog);
+        cascadeScopeSyncfsBusy = false;
+        try { if (done) { done(err); } }
+        finally { cascadeScopeDrainSyncfsQueue(); }
+      });
+    }
+
     var Module = {
+      // Expose the pending-deps set on Module so the C++ side (or a user in
+      // DevTools) can inspect it when debugging a stuck boot.
+      pendingDeps: cascadeScopePendingDeps,
+      // Serialized persist helper used by the C++ side via Module.syncfsPersist.
+      // Direct calls to Module.FS.syncfs(false, ...) still work and are used
+      // as a fallback; routing through here simply prevents concurrent writes.
+      syncfsPersist: function(callback) {
+        cascadeScopeSyncfsQueue.push(callback || null);
+        cascadeScopeDrainSyncfsQueue();
+      },
       preRun: [function () {
+        // Hook Emscripten's addRunDependency/removeRunDependency to keep
+        // cascadeScopePendingDeps in sync. Emscripten assigns these on
+        // Module during its own init, which completes before preRun runs
+        // — so this is the earliest safe hook point. User-set Module
+        // fields set on the literal above are clobbered by Emscripten
+        // init for these two specific names, so the wrap must happen here.
+        if (!Module.addRunDependency.__cs_wrapped)
+        {
+          var aOriginalAdd = Module.addRunDependency;
+          var aOriginalRemove = Module.removeRunDependency;
+          Module.addRunDependency = function (id) {
+            cascadeScopePendingDeps.add(id);
+            return aOriginalAdd.call(Module, id);
+          };
+          Module.removeRunDependency = function (id) {
+            cascadeScopePendingDeps.delete(id);
+            return aOriginalRemove.call(Module, id);
+          };
+          Module.addRunDependency.__cs_wrapped = true;
+        }
+
         var idbfs = (typeof IDBFS !== 'undefined')
           ? IDBFS
           : (FS && FS.filesystems ? FS.filesystems.IDBFS : null);
@@ -305,8 +391,28 @@
         }
         try { FS.mount(idbfs, {}, '/cs_config'); }
         catch (e) { console.warn('IDBFS mount failed:', e); return; }
+
+        // Watchdog: FS.syncfs(true) has been observed to never fire its
+        // callback when the tab's underlying IndexedDB is in a blocked
+        // state from the previous page-unload's writes. Without this,
+        // Loading... hangs forever. Settings hydration is best-effort —
+        // continuing without hydrated settings beats never loading.
         Module.addRunDependency('cs-config-syncfs');
+        var aIsSettled = false;
+        var aWatchdog = setTimeout(function () {
+          if (aIsSettled) { return; }
+          aIsSettled = true;
+          var aKnown = Array.from(cascadeScopePendingDeps);
+          console.warn('IDBFS hydrate timed out after '
+            + CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS
+            + 'ms; continuing without saved settings. Pending deps: '
+            + JSON.stringify(aKnown));
+          Module.removeRunDependency('cs-config-syncfs');
+        }, CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS);
         FS.syncfs(true, function (err) {
+          if (aIsSettled) { return; }
+          aIsSettled = true;
+          clearTimeout(aWatchdog);
           if (err) { console.warn('IDBFS hydrate failed:', err); }
           Module.removeRunDependency('cs-config-syncfs');
         });
@@ -321,9 +427,36 @@
         CascadeScopeShell.setStatus(text);
       },
       monitorRunDependencies: function(left) {
-        if (left === 0) Module.setStatus('');
+        if (left === 0) {
+          if (cascadeScopeStuckDepWatchdog !== null) {
+            clearTimeout(cascadeScopeStuckDepWatchdog);
+            cascadeScopeStuckDepWatchdog = null;
+          }
+          Module.setStatus('');
+          return;
+        }
+        // If run dependencies remain open for more than 2s, something is
+        // stalling boot — tell the user (and us, in bug reports) exactly
+        // which dependency names are still outstanding. Emscripten's own
+        // pre-preRun deps (wasm-instantiate, pthread pool workers) are not
+        // visible to our hook since they are added before preRun runs; if
+        // the known-names list is empty but `left > 0` we report that too,
+        // which is itself a strong diagnostic signal ("stuck in Emscripten
+        // internals, not our IDBFS hydrate").
+        if (cascadeScopeStuckDepWatchdog === null) {
+          var aLeftAtStart = left;
+          cascadeScopeStuckDepWatchdog = setTimeout(function () {
+            cascadeScopeStuckDepWatchdog = null;
+            var aKnown = Array.from(cascadeScopePendingDeps);
+            console.warn('CascadeScope: boot stalled — ' + aLeftAtStart
+                         + ' run deps still pending after 2s. Known-name set: '
+                         + (aKnown.length > 0 ? JSON.stringify(aKnown)
+                            : '[] (unnamed — likely Emscripten-internal, e.g. pthread pool or wasm-instantiate)'));
+          }, 2000);
+        }
       }
     };
+
     CascadeScopeFileUpload.init();
     window.onerror = function(message, source, lineno, colno, error) {
       var errorName = '';
@@ -349,77 +482,103 @@
       return false;
     };
   </script>
-  <script src="coi-serviceworker.js?v=1776289675"></script>
   <script>
-    // Safari workaround: on Cmd+R refresh, Safari may serve the HTML from its
-    // HTTP cache without routing through the service worker, so COOP/COEP headers
-    // are missing and SharedArrayBuffer is unavailable.  Fix: unregister the stale
-    // SW, redirect with a cache-buster, and let coi-serviceworker.js re-register
-    // from scratch (its install → skipWaiting → claim → reload flow always works).
-    // The updated SW adds Cache-Control: no-store on document responses, so once
-    // this cycle completes the problem does not recur.
-    (function() {
-      if (window.crossOriginIsolated) {
-        var url = new URL(location.href);
-        if (url.searchParams.has('_coi')) {
-          url.searchParams.delete('_coi');
-          history.replaceState(null, '', url);
-        }
-        return;
+    // Override coi-serviceworker.js's `doReload` so the reload it fires right
+    // after installing the SW is a cache-BYPASSING reload. Background: the
+    // first-ever navigation for a visitor does not go through any SW, so the
+    // HTML response lands in the browser's HTTP cache WITHOUT the COOP/COEP
+    // headers. A plain `location.reload()` can be served straight from that
+    // cache, so crossOriginIsolated stays false and we loop forever.
+    // Redirecting to the same URL with a unique `_csr` query forces the
+    // browser to issue a fresh network fetch — which now goes through the SW
+    // and gets the headers attached. coi-serviceworker.js reads `window.coi`
+    // at its line 77 (`...window.coi` spread into its defaults), so this
+    // override MUST be declared BEFORE the `<script src="coi-serviceworker.js">`
+    // tag below.
+    function cascadeScopeReloadWithCacheBypass(theReason) {
+      var aUrl = new URL(location.href);
+      if (aUrl.searchParams.has('_csr')) {
+        console.warn('CascadeScope: skip extra COI reload (' + theReason
+          + ') because cache-bypass reload was already attempted.');
+        return false;
       }
-      if (!navigator.serviceWorker) {
-        // Plain HTTP / file:// / missing SW support — the app will never load
-        // because the wasm module insert is gated on crossOriginIsolated below.
-        // Drag-drop listeners are also inert in this state (file payloads can't
-        // reach the C++ side). Surface a visible message so the user isn't stuck
-        // on "Loading...".
-        var statusEl = document.getElementById('status');
-        if (statusEl) {
-          statusEl.innerText = 'CascadeScope requires a cross-origin-isolated '
-            + 'context. Serve over HTTPS (or localhost) with a service worker '
-            + 'that sets COOP=same-origin and COEP=require-corp.';
-        }
-        return;
+      aUrl.searchParams.set('_csr', Date.now().toString());
+      location.replace(aUrl.href);
+      return true;
+    }
+
+    window.coi = {
+      doReload: function () {
+        cascadeScopeReloadWithCacheBypass('coi-serviceworker');
       }
-      var url = new URL(location.href);
-      if (url.searchParams.has('_coi')) {
-        // Already redirected — coi-serviceworker.js will re-register and reload.
-        url.searchParams.delete('_coi');
-        history.replaceState(null, '', url);
-        return;
-      }
-      // SW is controlling but page is not isolated: unregister and re-register.
-      if (navigator.serviceWorker.controller) {
-        document.getElementById('status').innerText = 'Enabling secure context...';
-        navigator.serviceWorker.getRegistration().then(function(reg) {
-          if (reg) {
-            reg.unregister().then(function() {
-              var freshUrl = new URL(location.href);
-              freshUrl.searchParams.set('_coi', '1');
-              location.replace(freshUrl);
-            });
-          }
-        });
-      }
-    })();
+    };
   </script>
+  <!-- No cache-buster query here: the URL used to register the Service Worker
+       IS the src attribute of the loader tag, and each distinct registration URL
+       is treated as a distinct SW by the browser. A per-build query would force
+       a fresh SW registration + reload on every rebuild. The SW file itself is
+       refreshed by the browser's built-in byte-compare update path on register(),
+       so the cache-buster here was never load-bearing. -->
+  <script src="coi-serviceworker.js"></script>
   <!-- <script async type="text/javascript" src="CascadeScope.js"></script> -->
   <script>
-    // Only start loading the wasm module if the page is already in a
-    // cross-origin-isolated context. If not, coi-serviceworker.js above will
-    // install the SW and trigger a reload (or the Safari recovery above will
-    // redirect with _coi=1) — in that case, loading CascadeScope.js now would
-    // race with the reload and fail with "SharedArrayBuffer transfer requires
-    // self.crossOriginIsolated" at loadWasmModuleToWorker. Gating the insert
-    // eliminates that race on every browser without adding workarounds.
-    if (window.crossOriginIsolated) {
-      var cascadeScopeModuleScript = document.createElement('script');
-      cascadeScopeModuleScript.async = true;
-      cascadeScopeModuleScript.type = 'text/javascript';
-      cascadeScopeModuleScript.src =
-        'CascadeScope.js?v=1776289675';
-      document.body.appendChild(cascadeScopeModuleScript);
-    }
+    // Load CascadeScope.js only in a cross-origin-isolated context. With
+    // -pthread, Emscripten's preRun spawns Web Workers and transfers a
+    // SharedArrayBuffer to them — that postMessage throws DataCloneError when
+    // crossOriginIsolated is false, and the ensuing pthread_create failure
+    // cascades into std::system_error from std::async calls in the C++ app,
+    // aborting the wasm runtime.
+    //
+    // We used to gate this unconditionally (commit c69d553), which caused an
+    // endless "Loading..." hang when the gate stayed closed across a reload:
+    // if coi-serviceworker.js's doReload() arrived before the SW had claimed
+    // the page, we'd land back here with crossOriginIsolated still false and
+    // no path out. The fix is to ALSO arm a fallback reload ourselves so the
+    // gate is guaranteed to converge to `true` eventually, regardless of
+    // whether the SW claim race goes our way or not.
+    (function () {
+      function aAppendModule() {
+        var aScript = document.createElement('script');
+        aScript.async = true;
+        aScript.type = 'text/javascript';
+        aScript.src = 'CascadeScope.js?v=1776332204';
+        document.body.appendChild(aScript);
+      }
+
+      if (window.crossOriginIsolated) {
+        var aCleanUrl = new URL(location.href);
+        if (aCleanUrl.searchParams.has('_csr')) {
+          aCleanUrl.searchParams.delete('_csr');
+          history.replaceState(null, '', aCleanUrl);
+        }
+        aAppendModule();
+        return;
+      }
+
+      if (!navigator.serviceWorker) {
+        CascadeScopeShell.setStatus('CascadeScope requires a cross-origin-isolated '
+          + 'context. Serve over HTTPS (or localhost) with a service worker '
+          + 'that sets COOP=same-origin and COEP=require-corp.');
+        return;
+      }
+
+      // Tell the user what's happening so they don't stare at an empty canvas.
+      CascadeScopeShell.setStatus('Enabling cross-origin isolation...');
+
+      // Fallback: if coi-serviceworker.js does not trigger a reload within
+      // 2.5 s (its normal path fires in well under 1 s on localhost), do a
+      // single cache-bypassing reload ourselves. If this was already attempted,
+      // stay on the page and report an actionable status instead of looping.
+      setTimeout(function () {
+        if (!window.crossOriginIsolated) {
+          var wasReloaded = cascadeScopeReloadWithCacheBypass('bootstrap-timeout');
+          if (!wasReloaded) {
+            CascadeScopeShell.setStatus('Unable to enable cross-origin isolation. '
+              + 'Please clear site data and reload.');
+          }
+        }
+      }, 2500);
+    })();
   </script>
 </body>
 </html>
