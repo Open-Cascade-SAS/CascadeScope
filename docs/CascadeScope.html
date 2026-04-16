@@ -281,7 +281,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776332204';
+    var CascadeScopeBuildStamp = '1776335586';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -307,6 +307,8 @@
     var cascadeScopeSyncfsBusy = false;
     var CASCADESCOPE_SYNCFS_PERSIST_TIMEOUT_MS = 5000;
     var CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS = 6000;
+    var CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS = 3;
+    var CASCADESCOPE_COI_RELOAD_COUNTER_KEY = 'CascadeScopeCoiReloadAttempts';
     function cascadeScopeDrainSyncfsQueue() {
       if (cascadeScopeSyncfsBusy || cascadeScopeSyncfsQueue.length === 0) {
         return;
@@ -495,13 +497,36 @@
     // at its line 77 (`...window.coi` spread into its defaults), so this
     // override MUST be declared BEFORE the `<script src="coi-serviceworker.js">`
     // tag below.
+    function cascadeScopeGetCoiReloadAttempts() {
+      try {
+        return parseInt(sessionStorage.getItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY), 10) || 0;
+      } catch (e) {
+        return 0;
+      }
+    }
+
+    function cascadeScopeSetCoiReloadAttempts(theAttempts) {
+      try {
+        sessionStorage.setItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY, String(theAttempts));
+      } catch (e) {}
+    }
+
+    function cascadeScopeResetCoiReloadAttempts() {
+      try {
+        sessionStorage.removeItem(CASCADESCOPE_COI_RELOAD_COUNTER_KEY);
+      } catch (e) {}
+    }
+
     function cascadeScopeReloadWithCacheBypass(theReason) {
       var aUrl = new URL(location.href);
-      if (aUrl.searchParams.has('_csr')) {
+      var anAttempts = cascadeScopeGetCoiReloadAttempts();
+      if (anAttempts >= CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS) {
         console.warn('CascadeScope: skip extra COI reload (' + theReason
-          + ') because cache-bypass reload was already attempted.');
+          + ') because the retry limit (' + CASCADESCOPE_COI_MAX_RELOAD_ATTEMPTS
+          + ') was reached.');
         return false;
       }
+      cascadeScopeSetCoiReloadAttempts(anAttempts + 1);
       aUrl.searchParams.set('_csr', Date.now().toString());
       location.replace(aUrl.href);
       return true;
@@ -541,12 +566,13 @@
         var aScript = document.createElement('script');
         aScript.async = true;
         aScript.type = 'text/javascript';
-        aScript.src = 'CascadeScope.js?v=1776332204';
+        aScript.src = 'CascadeScope.js?v=1776335586';
         document.body.appendChild(aScript);
       }
 
       if (window.crossOriginIsolated) {
         var aCleanUrl = new URL(location.href);
+        cascadeScopeResetCoiReloadAttempts();
         if (aCleanUrl.searchParams.has('_csr')) {
           aCleanUrl.searchParams.delete('_csr');
           history.replaceState(null, '', aCleanUrl);
@@ -565,10 +591,13 @@
       // Tell the user what's happening so they don't stare at an empty canvas.
       CascadeScopeShell.setStatus('Enabling cross-origin isolation...');
 
-      // Fallback: if coi-serviceworker.js does not trigger a reload within
-      // 2.5 s (its normal path fires in well under 1 s on localhost), do a
-      // single cache-bypassing reload ourselves. If this was already attempted,
-      // stay on the page and report an actionable status instead of looping.
+      // If a service worker already controls the page but COI is still off,
+      // coi-serviceworker.js will normally call reload() itself within ~1 s.
+      // Give it a short grace period before we step in, otherwise we race the
+      // SW's own reload and waste a retry slot on the warm-load happy path.
+      // If no controller exists yet, fall back to the original 2.5 s budget
+      // to cover the cold-claim case.
+      var aReloadDelayMs = navigator.serviceWorker.controller ? 800 : 2500;
       setTimeout(function () {
         if (!window.crossOriginIsolated) {
           var wasReloaded = cascadeScopeReloadWithCacheBypass('bootstrap-timeout');
@@ -577,7 +606,7 @@
               + 'Please clear site data and reload.');
           }
         }
-      }, 2500);
+      }, aReloadDelayMs);
     })();
   </script>
 </body>
