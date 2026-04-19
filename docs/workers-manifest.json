@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "buildTime": 1776639580,
+  "workers": [
+    { "name": "cascadescope-step-worker", "script": "cascadescope-step-worker.js", "wasm": "cascadescope-step-worker.wasm", "exportName": "CascadeScopeStepWorkerModule", "formats": ["step", "stp"] },
+    { "name": "cascadescope-iges-worker", "script": "cascadescope-iges-worker.js", "wasm": "cascadescope-iges-worker.wasm", "exportName": "CascadeScopeIgesWorkerModule", "formats": ["iges", "igs"] },
+    { "name": "cascadescope-mesh-worker", "script": "cascadescope-mesh-worker.js", "wasm": "cascadescope-mesh-worker.wasm", "exportName": "CascadeScopeMeshWorkerModule", "formats": ["stl", "obj", "ply", "wrl"] },
+    { "name": "cascadescope-mesher-worker", "script": "cascadescope-mesher-worker.js", "wasm": "cascadescope-mesher-worker.wasm", "exportName": "CascadeScopeMesherWorkerModule", "formats": ["brep"] }
+  ]
+}

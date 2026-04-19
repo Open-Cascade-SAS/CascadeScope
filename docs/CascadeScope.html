@@ -35,6 +35,7 @@
   <input type="file" id="cascadescope-file-input" style="display:none"
          accept=".step,.stp,.iges,.igs,.stl,.obj,.ply,.wrl,.brep,.xbf" multiple />
   <div id="cascadescope-open-overlay">Click anywhere to open file picker...</div>
+  <script src="cascadescope_workflow.js?v=1776639580"></script>
   <script type='text/javascript'>
     var CascadeScopeShell = {
       getCanvas: function() {
@@ -152,8 +153,6 @@
       // Load an array of File objects into the Emscripten VFS.
       loadFiles: function(files, options) {
         options = options || {};
-        var callbackName = options.callbackName || 'CascadeScope_WasmFileUploaded';
-        var dropZone = options.dropZone || 0;
         if (!Module['ccall'] || !Module['FS']) {
           console.warn('CascadeScope: runtime is not ready for file upload callbacks yet.');
           var statusEl = document.getElementById('status');
@@ -163,6 +162,17 @@
           }
           return;
         }
+        if (typeof CascadeScopeWorkflow !== 'undefined' && CascadeScopeWorkflow.enqueueBrowserFiles) {
+          CascadeScopeWorkflow.enqueueBrowserFiles(files, {
+            callbackName: options.callbackName || 'CascadeScope_WasmFileUploaded',
+            dropZone: options.dropZone || 0,
+            supportsFileName: CascadeScopeFileUpload.supportsFileName
+          });
+          return;
+        }
+        console.warn('CascadeScopeWorkflow is unavailable; using legacy upload path.');
+        var callbackName = options.callbackName || 'CascadeScope_WasmFileUploaded';
+        var dropZone = options.dropZone || 0;
         for (var i = 0; i < files.length; i++) {
           (function(file) {
             var reader = new FileReader();
@@ -281,7 +291,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1776631402';
+    var CascadeScopeBuildStamp = '1776639580';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -402,19 +412,27 @@
           console.warn('IDBFS unavailable; settings will not persist.');
           return;
         }
-        try { FS.mkdir('/cs_config'); }
-        catch (e) {
-          if (!e || e.code !== 'EEXIST') { console.warn('mkdir /cs_config:', e); }
+        function aEnsureMountedPath(path) {
+          try { FS.mkdir(path); }
+          catch (e) {
+            if (!e || e.code !== 'EEXIST') { console.warn('mkdir ' + path + ':', e); }
+          }
+          try { FS.mount(idbfs, {}, path); }
+          catch (e) { console.warn('IDBFS mount failed for ' + path + ':', e); return false; }
+          return true;
         }
-        try { FS.mount(idbfs, {}, '/cs_config'); }
-        catch (e) { console.warn('IDBFS mount failed:', e); return; }
+        if (!aEnsureMountedPath('/cs_config')
+         || !aEnsureMountedPath('/cs_staging')
+         || !aEnsureMountedPath('/cs_workflow')) {
+          return;
+        }
 
         // Watchdog: FS.syncfs(true) has been observed to never fire its
         // callback when the tab's underlying IndexedDB is in a blocked
         // state from the previous page-unload's writes. Without this,
         // Loading... hangs forever. Settings hydration is best-effort —
         // continuing without hydrated settings beats never loading.
-        Module.addRunDependency('cs-config-syncfs');
+        Module.addRunDependency('cs-idbfs-syncfs');
         var aIsSettled = false;
         var aWatchdog = setTimeout(function () {
           if (aIsSettled) { return; }
@@ -424,16 +442,21 @@
             + CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS
             + 'ms; continuing without saved settings. Pending deps: '
             + JSON.stringify(aKnown));
-          Module.removeRunDependency('cs-config-syncfs');
+          Module.removeRunDependency('cs-idbfs-syncfs');
         }, CASCADESCOPE_IDBFS_HYDRATE_TIMEOUT_MS);
         FS.syncfs(true, function (err) {
           if (aIsSettled) { return; }
           aIsSettled = true;
           clearTimeout(aWatchdog);
           if (err) { console.warn('IDBFS hydrate failed:', err); }
-          Module.removeRunDependency('cs-config-syncfs');
+          Module.removeRunDependency('cs-idbfs-syncfs');
         });
       }],
+      onRuntimeInitialized: function() {
+        if (typeof CascadeScopeWorkflow !== 'undefined' && CascadeScopeWorkflow.attachModule) {
+          CascadeScopeWorkflow.attachModule(Module);
+        }
+      },
       print: function(text) { console.log(text); },
       printErr: function(text) { console.error(text); },
       canvas: CascadeScopeShell.getCanvas(),
@@ -594,7 +617,7 @@
         var aScript = document.createElement('script');
         aScript.async = true;
         aScript.type = 'text/javascript';
-        aScript.src = 'CascadeScope.js?v=1776631402';
+        aScript.src = 'CascadeScope.js?v=1776639580';
         document.body.appendChild(aScript);
       }
 
