@@ -11093,18 +11093,18 @@ function checkIncomingModuleAPI() {
 }
 
 var ASM_CONSTS = {
-  2789101: () => {
+  2789765: () => {
     CascadeScopeFileUpload.requestOpen();
   },
-  2789143: ($0, $1) => {
+  2789807: ($0, $1) => {
     if (typeof CascadeScopeFileDownload !== "undefined" && CascadeScopeFileDownload.trigger) {
       CascadeScopeFileDownload.trigger(UTF8ToString($0), UTF8ToString($1));
     }
   },
-  2789310: ($0, $1) => {
+  2789974: ($0, $1) => {
     alert(UTF8ToString($0) + ": " + UTF8ToString($1));
   },
-  2789365: () => {
+  2790029: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11115,7 +11115,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientWidth > 0 ? canvas.clientWidth : 0;
   },
-  2789596: () => {
+  2790260: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11126,7 +11126,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
-  2789831: () => {
+  2790495: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
@@ -11141,16 +11141,16 @@ var ASM_CONSTS = {
       });
     }
   },
-  2790128: () => {
+  2790792: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  2790214: ($0, $1, $2, $3) => {
+  2790878: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
   },
-  2790309: () => {
+  2790973: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
