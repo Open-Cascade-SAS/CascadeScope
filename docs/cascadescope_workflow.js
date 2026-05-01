@@ -51,12 +51,28 @@
   var ENABLE_ISOLATED_IMPORT_WORKERS = true;
 
   // ── Concurrency configuration ─────────────────────────────────────────────
+  //
+  // Each isolated WASM worker carries its own ~hundreds-of-MB heap and runs on
+  // its own OS thread. We auto-size based on detected hardware concurrency,
+  // leaving one core for the UI/main thread. Capped at 8 to bound memory in
+  // webview hosts. Hosts can override at runtime via setConcurrency().
+  //
+  // This is the primary parallelism mechanism in single-threaded WASM mode
+  // (CASCADESCOPE_WASM_PTHREADS=OFF) — no SharedArrayBuffer required.
 
-  var concurrencyConfig = {
-    maxTotal: 2,
-    maxPerType: 1,
-    idleTerminateMs: 60000
-  };
+  function detectConcurrencyDefaults() {
+    var hw = (typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number')
+      ? navigator.hardwareConcurrency
+      : 4;
+    var total = Math.max(2, Math.min(8, hw - 1));
+    return {
+      maxTotal: total,
+      maxPerType: Math.max(1, Math.floor(total / 2)),
+      idleTerminateMs: 60000
+    };
+  }
+
+  var concurrencyConfig = detectConcurrencyDefaults();
 
   // ── State ─────────────────────────────────────────────────────────────────
 

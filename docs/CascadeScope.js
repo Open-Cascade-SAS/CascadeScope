@@ -1724,18 +1724,6 @@ var ___cxa_rethrow = () => {
   throw exceptionLast;
 };
 
-function ___cxa_rethrow_primary_exception(ptr) {
-  ptr >>>= 0;
-  if (!ptr) return;
-  var info = new ExceptionInfo(ptr);
-  info.set_rethrown(true);
-  info.set_caught(false);
-  uncaughtExceptionCount++;
-  ___cxa_increment_exception_refcount(ptr);
-  exceptionLast = new CppException(ptr);
-  throw exceptionLast;
-}
-
 var getExceptionMessageCommon = ptr => {
   var sp = stackSave();
   var type_addr_addr = stackAlloc(4);
@@ -11093,18 +11081,18 @@ function checkIncomingModuleAPI() {
 }
 
 var ASM_CONSTS = {
-  2797989: () => {
+  2798101: () => {
     CascadeScopeFileUpload.requestOpen();
   },
-  2798031: ($0, $1) => {
+  2798143: ($0, $1) => {
     if (typeof CascadeScopeFileDownload !== "undefined" && CascadeScopeFileDownload.trigger) {
       CascadeScopeFileDownload.trigger(UTF8ToString($0), UTF8ToString($1));
     }
   },
-  2798198: ($0, $1) => {
+  2798310: ($0, $1) => {
     alert(UTF8ToString($0) + ": " + UTF8ToString($1));
   },
-  2798253: () => {
+  2798365: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11115,7 +11103,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientWidth > 0 ? canvas.clientWidth : 0;
   },
-  2798484: () => {
+  2798596: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11126,7 +11114,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
-  2798719: () => {
+  2798831: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
@@ -11141,16 +11129,16 @@ var ASM_CONSTS = {
       });
     }
   },
-  2799016: () => {
+  2799128: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  2799102: ($0, $1, $2, $3) => {
+  2799214: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
   },
-  2799197: () => {
+  2799309: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
@@ -11386,7 +11374,6 @@ function assignWasmImports() {
     /** @export */ __cxa_find_matching_catch_4: ___cxa_find_matching_catch_4,
     /** @export */ __cxa_find_matching_catch_5: ___cxa_find_matching_catch_5,
     /** @export */ __cxa_rethrow: ___cxa_rethrow,
-    /** @export */ __cxa_rethrow_primary_exception: ___cxa_rethrow_primary_exception,
     /** @export */ __cxa_throw: ___cxa_throw,
     /** @export */ __cxa_uncaught_exceptions: ___cxa_uncaught_exceptions,
     /** @export */ __handle_stack_overflow: ___handle_stack_overflow,
