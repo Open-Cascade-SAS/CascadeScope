@@ -35,7 +35,7 @@
   <input type="file" id="cascadescope-file-input" style="display:none"
          accept=".step,.stp,.iges,.igs,.stl,.obj,.ply,.wrl,.brep,.xbf" multiple />
   <div id="cascadescope-open-overlay">Click anywhere to open file picker...</div>
-  <script src="cascadescope_workflow.js?v=1777833287"></script>
+  <script src="cascadescope_workflow.js?v=1777841140"></script>
   <script type='text/javascript'>
     var CascadeScopeShell = {
       getCanvas: function() {
@@ -291,7 +291,7 @@
       }
     };
 
-    var CascadeScopeBuildStamp = '1777833287';
+    var CascadeScopeBuildStamp = '1777841140';
     function cascadeScopeVersionedPath(path) {
       if (!path || path.indexOf('blob:') === 0 || path.indexOf('data:') === 0) {
         return path;
@@ -617,7 +617,7 @@
         var aScript = document.createElement('script');
         aScript.async = true;
         aScript.type = 'text/javascript';
-        aScript.src = 'CascadeScope.js?v=1777833287';
+        aScript.src = 'CascadeScope.js?v=1777841140';
         document.body.appendChild(aScript);
       }
 

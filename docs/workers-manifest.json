@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "buildTime": 1777833287,
+  "buildTime": 1777841140,
   "workers": [
     { "name": "cascadescope-step-worker", "script": "cascadescope-step-worker.js", "wasm": "cascadescope-step-worker.wasm", "exportName": "CascadeScopeStepWorkerModule", "formats": ["step", "stp"] },
     { "name": "cascadescope-iges-worker", "script": "cascadescope-iges-worker.js", "wasm": "cascadescope-iges-worker.wasm", "exportName": "CascadeScopeIgesWorkerModule", "formats": ["iges", "igs"] },
