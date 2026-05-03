@@ -10050,17 +10050,8 @@ function _emscripten_set_keydown_callback_on_thread(target, userData, useCapture
   return registerKeyEventCallback(target, userData, useCapture, callbackfunc, 2, "keydown", targetThread);
 }
 
-function _emscripten_set_keypress_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(44, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
-  target >>>= 0;
-  userData >>>= 0;
-  callbackfunc >>>= 0;
-  targetThread >>>= 0;
-  return registerKeyEventCallback(target, userData, useCapture, callbackfunc, 1, "keypress", targetThread);
-}
-
 function _emscripten_set_keyup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(45, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(44, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10124,7 +10115,7 @@ var registerMouseEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_mousedown_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(46, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(45, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10133,7 +10124,7 @@ function _emscripten_set_mousedown_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_mouseenter_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(47, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(46, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10142,7 +10133,7 @@ function _emscripten_set_mouseenter_callback_on_thread(target, userData, useCapt
 }
 
 function _emscripten_set_mouseleave_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(48, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(47, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10151,7 +10142,7 @@ function _emscripten_set_mouseleave_callback_on_thread(target, userData, useCapt
 }
 
 function _emscripten_set_mousemove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(49, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(48, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10160,7 +10151,7 @@ function _emscripten_set_mousemove_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_mouseup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(50, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(49, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10239,7 +10230,7 @@ var registerTouchEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_touchcancel_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(51, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(50, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10248,7 +10239,7 @@ function _emscripten_set_touchcancel_callback_on_thread(target, userData, useCap
 }
 
 function _emscripten_set_touchend_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(52, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(51, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10257,7 +10248,7 @@ function _emscripten_set_touchend_callback_on_thread(target, userData, useCaptur
 }
 
 function _emscripten_set_touchmove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(53, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(52, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10266,7 +10257,7 @@ function _emscripten_set_touchmove_callback_on_thread(target, userData, useCaptu
 }
 
 function _emscripten_set_touchstart_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(54, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(53, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10302,7 +10293,7 @@ var registerWheelEventCallback = (target, userData, useCapture, callbackfunc, ev
 };
 
 function _emscripten_set_wheel_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(55, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(54, 0, 1, target, userData, useCapture, callbackfunc, targetThread);
   target >>>= 0;
   userData >>>= 0;
   callbackfunc >>>= 0;
@@ -10456,7 +10447,7 @@ var getEnvStrings = () => {
 };
 
 function _environ_get(__environ, environ_buf) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(56, 0, 1, __environ, environ_buf);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(55, 0, 1, __environ, environ_buf);
   __environ >>>= 0;
   environ_buf >>>= 0;
   var bufSize = 0;
@@ -10471,7 +10462,7 @@ function _environ_get(__environ, environ_buf) {
 }
 
 function _environ_sizes_get(penviron_count, penviron_buf_size) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(57, 0, 1, penviron_count, penviron_buf_size);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(56, 0, 1, penviron_count, penviron_buf_size);
   penviron_count >>>= 0;
   penviron_buf_size >>>= 0;
   var strings = getEnvStrings();
@@ -10485,7 +10476,7 @@ function _environ_sizes_get(penviron_count, penviron_buf_size) {
 }
 
 function _fd_close(fd) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(58, 0, 1, fd);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(57, 0, 1, fd);
   try {
     var stream = SYSCALLS.getStreamFromFD(fd);
     FS.close(stream);
@@ -10515,7 +10506,7 @@ function _fd_close(fd) {
 };
 
 function _fd_read(fd, iov, iovcnt, pnum) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(59, 0, 1, fd, iov, iovcnt, pnum);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(58, 0, 1, fd, iov, iovcnt, pnum);
   iov >>>= 0;
   iovcnt >>>= 0;
   pnum >>>= 0;
@@ -10531,7 +10522,7 @@ function _fd_read(fd, iov, iovcnt, pnum) {
 }
 
 function _fd_seek(fd, offset, whence, newOffset) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(60, 0, 1, fd, offset, whence, newOffset);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(59, 0, 1, fd, offset, whence, newOffset);
   offset = bigintToI53Checked(offset);
   newOffset >>>= 0;
   try {
@@ -10569,7 +10560,7 @@ function _fd_seek(fd, offset, whence, newOffset) {
 };
 
 function _fd_write(fd, iov, iovcnt, pnum) {
-  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(61, 0, 1, fd, iov, iovcnt, pnum);
+  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(60, 0, 1, fd, iov, iovcnt, pnum);
   iov >>>= 0;
   iovcnt >>>= 0;
   pnum >>>= 0;
@@ -11068,7 +11059,7 @@ unexportedSymbols.forEach(unexportedRuntimeSymbol);
 // either synchronously or asynchronously from other threads in postMessage()d
 // or internally queued events. This way a pthread in a Worker can synchronously
 // access e.g. the DOM on the main thread.
-var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied, ___syscall_chmod, ___syscall_faccessat, ___syscall_fcntl64, ___syscall_fstat64, ___syscall_getdents64, ___syscall_ioctl, ___syscall_lstat64, ___syscall_mkdirat, ___syscall_newfstatat, ___syscall_openat, ___syscall_renameat, ___syscall_rmdir, ___syscall_stat64, ___syscall_unlinkat, __mmap_js, __munmap_js, _eglBindAPI, _eglChooseConfig, _eglCreateContext, _eglCreateWindowSurface, _eglDestroyContext, _eglDestroySurface, _eglGetCurrentContext, _eglGetCurrentDisplay, _eglGetCurrentSurface, _eglGetDisplay, _eglGetError, _eglInitialize, _eglMakeCurrent, _eglQueryString, _eglQuerySurface, _eglSwapBuffers, _eglTerminate, _emscripten_get_device_pixel_ratio, _emscripten_get_element_css_size, _emscripten_get_preloaded_image_data, _emscripten_set_beforeunload_callback_on_thread, _emscripten_set_blur_callback_on_thread, setCanvasElementSizeMainThread, _emscripten_set_focus_callback_on_thread, _emscripten_set_keydown_callback_on_thread, _emscripten_set_keypress_callback_on_thread, _emscripten_set_keyup_callback_on_thread, _emscripten_set_mousedown_callback_on_thread, _emscripten_set_mouseenter_callback_on_thread, _emscripten_set_mouseleave_callback_on_thread, _emscripten_set_mousemove_callback_on_thread, _emscripten_set_mouseup_callback_on_thread, _emscripten_set_touchcancel_callback_on_thread, _emscripten_set_touchend_callback_on_thread, _emscripten_set_touchmove_callback_on_thread, _emscripten_set_touchstart_callback_on_thread, _emscripten_set_wheel_callback_on_thread, _environ_get, _environ_sizes_get, _fd_close, _fd_read, _fd_seek, _fd_write ];
+var proxiedFunctionTable = [ _proc_exit, exitOnMainThread, pthreadCreateProxied, ___syscall_chmod, ___syscall_faccessat, ___syscall_fcntl64, ___syscall_fstat64, ___syscall_getdents64, ___syscall_ioctl, ___syscall_lstat64, ___syscall_mkdirat, ___syscall_newfstatat, ___syscall_openat, ___syscall_renameat, ___syscall_rmdir, ___syscall_stat64, ___syscall_unlinkat, __mmap_js, __munmap_js, _eglBindAPI, _eglChooseConfig, _eglCreateContext, _eglCreateWindowSurface, _eglDestroyContext, _eglDestroySurface, _eglGetCurrentContext, _eglGetCurrentDisplay, _eglGetCurrentSurface, _eglGetDisplay, _eglGetError, _eglInitialize, _eglMakeCurrent, _eglQueryString, _eglQuerySurface, _eglSwapBuffers, _eglTerminate, _emscripten_get_device_pixel_ratio, _emscripten_get_element_css_size, _emscripten_get_preloaded_image_data, _emscripten_set_beforeunload_callback_on_thread, _emscripten_set_blur_callback_on_thread, setCanvasElementSizeMainThread, _emscripten_set_focus_callback_on_thread, _emscripten_set_keydown_callback_on_thread, _emscripten_set_keyup_callback_on_thread, _emscripten_set_mousedown_callback_on_thread, _emscripten_set_mouseenter_callback_on_thread, _emscripten_set_mouseleave_callback_on_thread, _emscripten_set_mousemove_callback_on_thread, _emscripten_set_mouseup_callback_on_thread, _emscripten_set_touchcancel_callback_on_thread, _emscripten_set_touchend_callback_on_thread, _emscripten_set_touchmove_callback_on_thread, _emscripten_set_touchstart_callback_on_thread, _emscripten_set_wheel_callback_on_thread, _environ_get, _environ_sizes_get, _fd_close, _fd_read, _fd_seek, _fd_write ];
 
 function checkIncomingModuleAPI() {
   ignoredModuleProp("fetchSettings");
@@ -11081,18 +11072,18 @@ function checkIncomingModuleAPI() {
 }
 
 var ASM_CONSTS = {
-  3425157: () => {
+  3425765: () => {
     CascadeScopeFileUpload.requestOpen();
   },
-  3425199: ($0, $1) => {
+  3425807: ($0, $1) => {
     if (typeof CascadeScopeFileDownload !== "undefined" && CascadeScopeFileDownload.trigger) {
       CascadeScopeFileDownload.trigger(UTF8ToString($0), UTF8ToString($1));
     }
   },
-  3425366: ($0, $1) => {
+  3425974: ($0, $1) => {
     alert(UTF8ToString($0) + ": " + UTF8ToString($1));
   },
-  3425421: () => {
+  3426029: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11103,7 +11094,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientWidth > 0 ? canvas.clientWidth : 0;
   },
-  3425652: () => {
+  3426260: () => {
     const canvas = document.getElementById("canvas");
     if (!canvas) {
       return 0;
@@ -11114,7 +11105,7 @@ var ASM_CONSTS = {
     }
     return canvas.clientHeight > 0 ? canvas.clientHeight : 0;
   },
-  3425887: () => {
+  3426495: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
@@ -11129,16 +11120,16 @@ var ASM_CONSTS = {
       });
     }
   },
-  3426184: () => {
+  3426792: () => {
     const canvas = document.getElementById("canvas");
     if (canvas) {
       canvas.focus();
     }
   },
-  3426270: ($0, $1, $2, $3) => {
+  3426878: ($0, $1, $2, $3) => {
     Module.ctx.getBufferSubData($0, Number($1), (growMemViews(), HEAPU8).subarray(Number($2) >>> 0, Number($2 + $3) >>> 0));
   },
-  3426365: () => {
+  3426973: () => {
     if (Module.syncfsPersist) {
       Module.syncfsPersist(function(err) {
         if (err) {
@@ -11724,7 +11715,6 @@ function assignWasmImports() {
     /** @export */ emscripten_set_canvas_element_size: _emscripten_set_canvas_element_size,
     /** @export */ emscripten_set_focus_callback_on_thread: _emscripten_set_focus_callback_on_thread,
     /** @export */ emscripten_set_keydown_callback_on_thread: _emscripten_set_keydown_callback_on_thread,
-    /** @export */ emscripten_set_keypress_callback_on_thread: _emscripten_set_keypress_callback_on_thread,
     /** @export */ emscripten_set_keyup_callback_on_thread: _emscripten_set_keyup_callback_on_thread,
     /** @export */ emscripten_set_main_loop_arg: _emscripten_set_main_loop_arg,
     /** @export */ emscripten_set_mousedown_callback_on_thread: _emscripten_set_mousedown_callback_on_thread,
