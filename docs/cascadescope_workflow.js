@@ -325,6 +325,10 @@
     return bytes;
   }
 
+  function isNotFoundError(err) {
+    return !!err && (err.code === 'ENOENT' || err.errno === 44);
+  }
+
   // ── Persistence ───────────────────────────────────────────────────────────
 
   function writeJsonAtomic(path, tempPath, value) {
@@ -332,7 +336,7 @@
     try {
       moduleRef.FS.unlink(tempPath);
     } catch (err) {
-      if (!(err && err.code === 'ENOENT')) {
+      if (!isNotFoundError(err)) {
         console.warn('CascadeScopeWorkflow: failed to clear temporary file', err);
       }
     }
@@ -628,7 +632,7 @@
     try {
       moduleRef.FS.unlink(targetPath);
     } catch (err) {
-      if (!(err && err.code === 'ENOENT')) {
+      if (!isNotFoundError(err)) {
         console.warn('CascadeScopeWorkflow: failed to remove previous tmp file ' + targetPath, err);
       }
     }
