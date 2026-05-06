@@ -1437,11 +1437,66 @@
     monitorTimerId = setInterval(monitorHeartbeats, HEARTBEAT_INTERVAL_MS);
     schedulePersist();
 
+    // Suspend/resume the heartbeat monitor with the page-visibility lifecycle.
+    // Without this, a hidden tab keeps firing the 5 s interval, defeats the
+    // browser's background-tab throttling, and burns battery.
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+    if (typeof global.addEventListener === 'function') {
+      global.addEventListener('beforeunload', detachModule);
+      global.addEventListener('pagehide', detachModule);
+    }
+
     // Load worker manifest and probe backends in background
     loadWorkerManifest();
     probeAllBackends();
 
     emit('workflow:attached');
+  }
+
+  function handleVisibilityChange() {
+    if (typeof document === 'undefined') return;
+    if (document.hidden) {
+      if (monitorTimerId !== null) {
+        clearInterval(monitorTimerId);
+        monitorTimerId = null;
+      }
+    } else if (isAttached && monitorTimerId === null) {
+      // Reset every running job's lastHeartbeat to "now" before re-arming the
+      // monitor. Otherwise the first tick after a long hidden period sees
+      // (now - lastHeartbeat) spanning the entire hidden window and falsely
+      // times out workers that were either throttled by the browser or were
+      // doing real work on a thread that didn't pause.
+      var resumeTime = nowMs();
+      runningJobs.forEach(function(job) {
+        if (job.lastHeartbeat) {
+          job.lastHeartbeat = resumeTime;
+        }
+      });
+      monitorTimerId = setInterval(monitorHeartbeats, HEARTBEAT_INTERVAL_MS);
+    }
+  }
+
+  function detachModule() {
+    if (!isAttached) return;
+    if (monitorTimerId !== null) {
+      clearInterval(monitorTimerId);
+      monitorTimerId = null;
+    }
+    if (persistTimerId !== null) {
+      clearTimeout(persistTimerId);
+      persistTimerId = null;
+    }
+    if (typeof document !== 'undefined' && document.removeEventListener) {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
+    if (typeof global.removeEventListener === 'function') {
+      global.removeEventListener('beforeunload', detachModule);
+      global.removeEventListener('pagehide', detachModule);
+    }
+    isAttached = false;
+    emit('workflow:detached');
   }
 
   // ── Job creation ──────────────────────────────────────────────────────────
@@ -1912,6 +1967,7 @@
 
     // Module lifecycle
     attachModule: attachModule,
+    detachModule: detachModule,
 
     // Job management
     enqueueBrowserFiles: enqueueBrowserFiles,
