@@ -626,7 +626,7 @@
     flushBrowserRequestIfReady(job.requestId);
   }
 
-  function copyToLegacyTmpPath(sourcePath, fileName, job, fileIndex) {
+  function copyToCallbackTmpPath(sourcePath, fileName, job, fileIndex) {
     var targetPath = callbackPathForJobFile(job, fileIndex, fileName);
     var payload = moduleRef.FS.readFile(sourcePath);
     try {
@@ -651,7 +651,7 @@
 
   // ── Worker bootstrap & IPC ────────────────────────────────────────────────
   // The bootstrap runs inside a blob: Worker. It supports two modes:
-  // 1. One-shot (type: 'run') — legacy single-use worker
+  // 1. One-shot (type: 'run') — single-use worker
   // 2. Pooled  (type: 'init' then 'run') — reusable worker
   // In pooled mode the Worker thread stays alive between jobs. Only the
   // Emscripten module is re-instantiated (fast due to browser WASM cache).
@@ -933,17 +933,17 @@
   }
 
   function callbackStagedOutputToViewer(job, stagedOutputPath, outputFileName, sourceFileName, sourceIndex) {
-    var legacyPath = callbackPathForJobFile(job, sourceIndex, outputFileName);
+    var callbackPath = callbackPathForJobFile(job, sourceIndex, outputFileName);
     var outputBytes = moduleRef.FS.readFile(stagedOutputPath);
-    writeBinary(legacyPath, outputBytes);
+    writeBinary(callbackPath, outputBytes);
     var hasSupported = false;
     if (typeof job.supportsFileName === 'function') {
       hasSupported = !!job.supportsFileName(sourceFileName);
     }
     if (!job.requestId) {
-      invokeCppCallback(job, legacyPath, hasSupported);
+      invokeCppCallback(job, callbackPath, hasSupported);
     }
-    return legacyPath;
+    return callbackPath;
   }
 
   // ── Backend: isolated XBF conversion (shared by STEP/IGES/mesh workers) ──
@@ -1009,7 +1009,7 @@
     for (var j = 0; j < stagedInputs.length; ++j) {
       var sourcePath = stagedInputs[j];
       var fileName = job.browserFiles[j].name;
-      var targetPath = copyToLegacyTmpPath(sourcePath, fileName, job, j);
+      var targetPath = copyToCallbackTmpPath(sourcePath, fileName, job, j);
       callbackTargets.push(targetPath);
       var hasSupported = false;
       if (typeof job.supportsFileName === 'function') {
@@ -1054,7 +1054,7 @@
     });
 
     if (!submitResponse.ok) {
-      // Fallback: try legacy JSON+base64 format for older servers
+      // Fallback: try JSON+base64 format for servers without multipart support.
       var filesPayload = [];
       for (var fi = 0; fi < job.browserFiles.length; ++fi) {
         var browserFile = job.browserFiles[fi];
@@ -1064,10 +1064,10 @@
           contentBase64: toBase64(bytes)
         });
       }
-      var legacyHeaders = Object.assign({ 'Content-Type': 'application/json' }, headers);
+      var jsonHeaders = Object.assign({ 'Content-Type': 'application/json' }, headers);
       submitResponse = await fetch(baseUrl, {
         method: 'POST',
-        headers: legacyHeaders,
+        headers: jsonHeaders,
         body: JSON.stringify({ job: exportJob(job), files: filesPayload })
       });
       if (!submitResponse.ok) {
